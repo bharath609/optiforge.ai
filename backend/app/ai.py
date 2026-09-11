@@ -10,7 +10,10 @@ from .schemas import PlanningModel
 async def extract_model(problem: str) -> PlanningModel:
     api_key = os.getenv("EXPLABS_API_KEY")
     if api_key:
-        return await _extract_with_provider(problem, api_key)
+        try:
+            return await _extract_with_provider(problem, api_key)
+        except Exception:
+            return _extract_with_fallback(problem)
     return _extract_with_fallback(problem)
 
 
@@ -54,6 +57,14 @@ def _extract_with_fallback(problem: str) -> PlanningModel:
             products.append({"name": name, "profit": float(profit), "resource_usage": usage, "demand_limit": float(demand_match.group(1)) if demand_match else None})
 
     capacities = _parse_resource_values(re.search(r"We have (.*?)(?:Demand|$)", text, re.I).group(1) if re.search(r"We have (.*?)(?:Demand|$)", text, re.I) else "")
+    for product in products:
+        for resource in product["resource_usage"]:
+            matching_capacity = next(
+                (name for name in capacities if name.lower() in resource.lower() or resource.lower() in name.lower()),
+                None,
+            )
+            if matching_capacity and resource not in capacities:
+                capacities[resource] = capacities.pop(matching_capacity)
     if not products or not capacities:
         raise ValueError("Could not extract a complete model. Add product profits, resource usage, and capacities, or configure EXPLABS_API_KEY.")
     return PlanningModel.model_validate({"products": products, "capacities": capacities})
