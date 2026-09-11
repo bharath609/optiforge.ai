@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -27,6 +29,47 @@ class PlanningModel(BaseModel):
         return value
 
 
+class TransportSource(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    supply: float = Field(ge=0)
+
+
+class TransportDestination(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    demand: float = Field(ge=0)
+
+
+class TransportationModel(BaseModel):
+    sources: list[TransportSource] = Field(min_length=1, max_length=50)
+    destinations: list[TransportDestination] = Field(min_length=1, max_length=50)
+    costs: dict[str, dict[str, float]]
+
+    @field_validator("costs")
+    @classmethod
+    def costs_must_be_non_negative(cls, value: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+        if any(cost < 0 for destination_costs in value.values() for cost in destination_costs.values()):
+            raise ValueError("transportation costs must be non-negative")
+        return value
+
+
+class GameModel(BaseModel):
+    player_one_actions: list[str] = Field(min_length=2, max_length=30)
+    player_two_actions: list[str] = Field(min_length=2, max_length=30)
+    payoffs: dict[str, dict[str, float]]
+    zero_sum: bool = True
+
+
+class BusinessModel(BaseModel):
+    model_type: Literal["production", "transportation", "game_theory"]
+    model: PlanningModel | TransportationModel | GameModel
+    problem_summary: str = ""
+    technique: str = ""
+    objective: str = ""
+    variables: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
 class ProblemRequest(BaseModel):
     problem: str = Field(min_length=10, max_length=10000)
 
@@ -44,9 +87,33 @@ class ResourceResult(BaseModel):
     utilization: float
 
 
+class ShipmentResult(BaseModel):
+    source: str
+    destination: str
+    quantity: float
+    cost: float
+
+
+class StrategyResult(BaseModel):
+    player: str
+    action: str
+    probability: float
+
+
 class AnalyzeResponse(BaseModel):
-    model: PlanningModel
-    products: list[ProductResult]
-    resources: list[ResourceResult]
-    total_profit: float
+    model_type: Literal["production", "transportation", "game_theory"]
+    model: PlanningModel | TransportationModel | GameModel
+    problem_summary: str = ""
+    technique: str = ""
+    objective: str = ""
+    variables: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    products: list[ProductResult] = Field(default_factory=list)
+    resources: list[ResourceResult] = Field(default_factory=list)
+    shipments: list["ShipmentResult"] = Field(default_factory=list)
+    strategies: list[StrategyResult] = Field(default_factory=list)
+    game_value: float | None = None
+    total_profit: float | None = None
+    total_cost: float | None = None
     explanation: str

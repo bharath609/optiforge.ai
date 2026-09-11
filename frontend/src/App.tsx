@@ -3,7 +3,9 @@ import './App.css'
 
 type ProductResult = { name: string; quantity: number; profit: number }
 type ResourceResult = { name: string; used: number; capacity: number; utilization: number }
-type Analysis = { products: ProductResult[]; resources: ResourceResult[]; total_profit: number; explanation: string }
+type ShipmentResult = { source: string; destination: string; quantity: number; cost: number }
+type StrategyResult = { player: string; action: string; probability: number }
+type Analysis = { model_type: 'production' | 'transportation' | 'game_theory'; problem_summary: string; technique: string; objective: string; variables: string[]; constraints: string[]; assumptions: string[]; products: ProductResult[]; resources: ResourceResult[]; shipments: ShipmentResult[]; strategies: StrategyResult[]; game_value?: number; total_profit?: number; total_cost?: number; explanation: string }
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 function App() {
@@ -55,8 +57,8 @@ function App() {
           <p className="eyebrow">AI-POWERED OPERATIONS RESEARCH</p>
           <h1>Turn operational complexity<br />into clear decisions.</h1>
           <p className="hero-text">
-            Describe your production problem in simple language.
-            OptiForge will help create the best plan.
+            Describe your business problem in simple language.
+            OptiForge will identify the model and create the best plan.
           </p>
         </section>
 
@@ -64,15 +66,15 @@ function App() {
           <div className="prompt-heading">
             <div>
               <h2>What would you like to optimize?</h2>
-              <p>Include products, profit, resources, capacity, and demand if you know them.</p>
+              <p>Include the decisions, constraints, costs, demand, and locations if you know them.</p>
             </div>
-            <span className="badge">Production planning</span>
+            <span className="badge">AI model selection</span>
           </div>
 
           <textarea
             value={problem}
             onChange={(event) => setProblem(event.target.value)}
-            placeholder="Example: I make Product A and Product B. Product A earns $30 and needs 2 machine hours. Product B earns $20 and needs 1 machine hour. I have 100 machine hours. What should I produce to maximize profit?"
+            placeholder="Example: We have two warehouses, three stores, available inventory, store demand, and shipping costs between each warehouse and store. Find the lowest-cost shipping plan."
           />
 
           <div className="prompt-footer">
@@ -87,12 +89,41 @@ function App() {
 
         {analysis && (
           <section className="results" aria-live="polite">
+            <div className="result-panel formulation">
+              <p className="eyebrow">MODEL UNDERSTANDING</p>
+              <h3>{analysis.problem_summary}</h3>
+              <div className="metric-row"><span>Technique</span><strong>{analysis.technique}</strong></div>
+              <div className="metric-row"><span>Objective</span><strong>{analysis.objective}</strong></div>
+              {analysis.variables.length > 0 && <p><small>Decisions: {analysis.variables.join(', ')}</small></p>}
+              {analysis.constraints.length > 0 && <p><small>Constraints: {analysis.constraints.join('; ')}</small></p>}
+              {analysis.assumptions.length > 0 && <p><small>Assumptions: {analysis.assumptions.join('; ')}</small></p>}
+            </div>
+              {analysis.model_type === 'game_theory' ? (
+                <>
+                  <div className="result-header">
+                    <div><p className="eyebrow">GAME THEORY</p><h2>Recommended mixed strategy</h2></div>
+                    <div className="profit"><span>Expected payoff</span><strong>{analysis.game_value}</strong></div>
+                  </div>
+                  <p className="explanation">{analysis.explanation}</p>
+                  <div className="result-panel"><h3>Player 1 strategy</h3>{analysis.strategies.map((strategy) => <div className="metric-row" key={strategy.action}><span>{strategy.action}</span><strong>{Math.round(strategy.probability * 100)}%</strong></div>)}</div>
+                </>
+              ) : analysis.model_type === 'transportation' ? (
+                <>
+                  <div className="result-header">
+                    <div><p className="eyebrow">TRANSPORTATION PLAN</p><h2>Shipping recommendation</h2></div>
+                    <div className="profit"><span>Total shipping cost</span><strong>${analysis.total_cost?.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></div>
+                  </div>
+                  <p className="explanation">{analysis.explanation}</p>
+                  <div className="result-panel"><h3>Ship these quantities</h3>{analysis.shipments.map((shipment) => <div className="metric-row" key={`${shipment.source}-${shipment.destination}`}><span>{shipment.source} to {shipment.destination}</span><strong>{shipment.quantity} units · ${shipment.cost.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></div>)}</div>
+                </>
+              ) : (
+                <>
             <div className="result-header">
               <div>
                 <p className="eyebrow">OPTIMAL PLAN</p>
                 <h2>Production recommendation</h2>
               </div>
-              <div className="profit"><span>Total profit</span><strong>${analysis.total_profit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></div>
+              <div className="profit"><span>Total profit</span><strong>${analysis.total_profit?.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></div>
             </div>
             <p className="explanation">{analysis.explanation}</p>
             <div className="result-grid">
@@ -105,6 +136,8 @@ function App() {
                 {analysis.resources.map((resource) => <div className="resource" key={resource.name}><div className="metric-row"><span>{resource.name}</span><strong>{Math.round(resource.utilization * 100)}%</strong></div><div className="bar"><i style={{ width: `${Math.min(resource.utilization * 100, 100)}%` }} /></div><small>{resource.used} of {resource.capacity} available</small></div>)}
               </div>
             </div>
+              </>
+            )}
           </section>
         )}
 
