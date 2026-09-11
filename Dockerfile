@@ -11,4 +11,4 @@ ENV PYTHONPATH=/app/backend
 ENV PORT=7860
 EXPOSE 7860
 
-CMD uvicorn app.main:app --app-dir /app/backend --host 0.0.0.0 --port ${PORT}
+CMD ["sh", "-c", "uvicorn app.main:app --app-dir /app/backend --host 0.0.0.0 --port ${PORT:-7860}"]
