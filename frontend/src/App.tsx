@@ -46,6 +46,7 @@ function App() {
   const [backend, setBackend] = useState<'checking' | 'online' | 'offline'>('checking')
   const [copied, setCopied] = useState(false)
   const [solvedVia, setSolvedVia] = useState<'api' | 'ai' | 'browser' | null>(null)
+  const [aiNote, setAiNote] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -75,6 +76,7 @@ function App() {
     setMessage('')
     setAnalysis(null)
     setSolvedVia(null)
+    setAiNote(null)
 
     // 1) Try the hosted API first (it adds GPT-6 Astra understanding when configured).
     try {
@@ -108,8 +110,11 @@ function App() {
         setSolvedVia('ai')
         setLoading(false)
         return
-      } catch {
-        // fall through to the built-in offline solver
+      } catch (error) {
+        // Remember why, so the UI can show it — then fall through to offline.
+        const reason = error instanceof Error ? error.message : 'AI request failed.'
+        setAiNote(reason)
+        console.warn('[optiforge] AI assist failed:', reason)
       }
     }
 
@@ -309,6 +314,12 @@ function App() {
         {message && (
           <p className="message error" role="alert">
             {message}
+          </p>
+        )}
+
+        {aiNote && solvedVia === 'browser' && (
+          <p className="message" role="status">
+            AI assist unavailable ({aiNote}) — answered with the offline solver instead.
           </p>
         )}
 
