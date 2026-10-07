@@ -1,8 +1,13 @@
 # Public deployment
 
-The production setup uses Vercel for the Vite frontend and Render for the FastAPI backend.
+The frontend works **standalone**: it parses production, transportation, and
+game-theory problems and solves them in the browser (`frontend/src/lib/`,
+verified against the HiGHS backend). Deploying only the frontend on Vercel is
+enough for a fully working public site — no server, no API keys, no card.
 
-For a no-card setup, use Vercel for the frontend and a Hugging Face Docker Space for the backend. The root `Dockerfile` starts FastAPI on Hugging Face's `$PORT` (normally 7860).
+The FastAPI backend (`backend/`) is **optional**. It adds GPT-6 Astra
+understanding of free-form descriptions. The site tries `VITE_API_URL` first
+and silently falls back to the built-in browser solver.
 
 ## 1. Push the project
 

@@ -1,27 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
-
-type ProductResult = { name: string; quantity: number; profit: number }
-type ResourceResult = { name: string; used: number; capacity: number; utilization: number }
-type ShipmentResult = { source: string; destination: string; quantity: number; cost: number }
-type StrategyResult = { player: string; action: string; probability: number }
-type Analysis = {
-  model_type: 'production' | 'transportation' | 'game_theory'
-  problem_summary: string
-  technique: string
-  objective: string
-  variables: string[]
-  constraints: string[]
-  assumptions: string[]
-  products: ProductResult[]
-  resources: ResourceResult[]
-  shipments: ShipmentResult[]
-  strategies: StrategyResult[]
-  game_value?: number
-  total_profit?: number
-  total_cost?: number
-  explanation: string
-}
+import { solveLocally, type Analysis } from './lib/localSolver'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
@@ -44,6 +23,12 @@ const EXAMPLES = [
     prompt:
       'Product Phone gives 120 profit and needs 2 units Chips and 1 units Assembly. Product Tablet gives 100 profit and needs 1 units Chips and 2 units Assembly. We have 200 units Chips and 180 units Assembly.',
   },
+  {
+    label: 'Shipping plan',
+    tag: 'Transportation · works instantly',
+    prompt:
+      'Warehouse A has supply 100. Warehouse B has supply 150. Store X needs demand 120. Store Y needs demand 130. Shipping costs: A to X costs 4, A to Y costs 6, B to X costs 5, B to Y costs 3.',
+  },
 ]
 
 function App() {
@@ -53,6 +38,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [backend, setBackend] = useState<'checking' | 'online' | 'offline'>('checking')
   const [copied, setCopied] = useState(false)
+  const [solvedVia, setSolvedVia] = useState<'api' | 'browser' | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -81,24 +67,39 @@ function App() {
     setLoading(true)
     setMessage('')
     setAnalysis(null)
+    setSolvedVia(null)
 
+    // 1) Try the hosted API first (it adds GPT-6 Astra understanding when configured).
     try {
-      const response = await fetch(`${API_URL}/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ problem }),
-      })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'The model could not be solved.')
-      setAnalysis(data)
-    } catch (error) {
-      if (API_URL.includes('127.0.0.1') || API_URL.includes('localhost')) {
-        setMessage(
-          'Demo backend is not connected yet. The public API is being moved to Hugging Face — try the examples locally with `uvicorn app.main:app` running, or check back soon.',
-        )
-      } else {
-        setMessage(error instanceof Error ? error.message : 'Could not reach the backend. Please try again.')
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 15000)
+      try {
+        const response = await fetch(`${API_URL}/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ problem }),
+          signal: controller.signal,
+        })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.detail || 'The model could not be solved.')
+        setAnalysis(data)
+        setSolvedVia('api')
+        setLoading(false)
+        return
+      } finally {
+        clearTimeout(timer)
       }
+    } catch {
+      // fall through to the built-in offline solver
+    }
+
+    // 2) Offline engine: parse + solve right in the browser. No server, no key.
+    try {
+      const local = solveLocally(problem)
+      setAnalysis(local)
+      setSolvedVia('browser')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not solve this problem. Please try again.')
     } finally {
       setLoading(false)
     }
@@ -153,7 +154,7 @@ function App() {
         </nav>
         <div className="nav-cta">
           <span className={`status status-${backend}`}>
-            <i /> {backend === 'checking' ? 'Checking API…' : backend === 'online' ? 'API online' : 'Demo mode'}
+            <i /> {backend === 'checking' ? 'Checking API…' : backend === 'online' ? 'API online' : 'Offline solver ready'}
           </span>
           <a className="btn btn-small" href="#solver">
             Start optimizing
@@ -268,8 +269,7 @@ function App() {
 
           <div className="prompt-footer">
             <span>
-              {charCount.toLocaleString()} / 10,000 chars · No signup needed ·{' '}
-              {backend === 'online' ? 'Backend connected.' : 'Works instantly for production examples.'}
+              {charCount.toLocaleString()} / 10,000 chars · No signup · Solves in your browser, no server needed
             </span>
             <button className="btn btn-primary" onClick={handleSolve} disabled={loading} type="button">
               {loading ? (
@@ -311,9 +311,14 @@ function App() {
                   <p className="eyebrow">MODEL UNDERSTANDING</p>
                   <h3>{analysis.problem_summary}</h3>
                 </div>
-                <button className="btn btn-ghost btn-small" onClick={copyPlan} type="button">
-                  {copied ? 'Copied ✓' : 'Copy plan'}
-                </button>
+                <div className="result-actions">
+                  <span className="badge">
+                    {solvedVia === 'api' ? 'Solved via live API' : 'Solved in your browser'}
+                  </span>
+                  <button className="btn btn-ghost btn-small" onClick={copyPlan} type="button">
+                    {copied ? 'Copied ✓' : 'Copy plan'}
+                  </button>
+                </div>
               </div>
               <div className="metric-row">
                 <span>Technique</span>
@@ -477,8 +482,8 @@ function App() {
             </div>
           </div>
           <p className="note">
-            Production examples run instantly with no API key. Transportation and game theory use GPT-6 Astra when
-            configured, with a smart local fallback.
+            All three model types solve instantly in your browser — no signup, no server, no API key.
+            Connect the optional FastAPI backend with GPT-6 Astra for free-form descriptions.
           </p>
         </section>
       </main>
