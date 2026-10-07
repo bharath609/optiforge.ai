@@ -28,13 +28,31 @@ Commit and push the application to GitHub. Do not commit `backend/.env` or any A
 ### No-card backend: Hugging Face Space
 
 1. Create a new Docker Space at https://huggingface.co/new-space.
-2. Connect or upload the repository's root `Dockerfile`, `.dockerignore`, and `backend` folder to the Space.
-3. Add these Space secrets under Settings > Variables and secrets:
-   - `EXPLABS_API_KEY`
-   - `SIMPLE_AI_API_KEY`
-   - `FRONTEND_ORIGINS=https://optiforge.ai,https://www.optiforge.ai`
-4. Wait for the Space to build, then confirm `https://<space-owner>-<space-name>.hf.space/` returns the backend health message.
-5. Set Vercel's `VITE_API_URL` to that Hugging Face URL instead of a Render URL.
+   - Name it e.g. `optiforge-api`, pick **Docker** as the SDK, leave visibility Public (free).
+2. In the Space, create/replace `README.md` with exactly this (it tells HF to use Docker on port 7860):
+
+   ```markdown
+   ---
+   title: OptiForge API
+   emoji: ⚙️
+   colorFrom: green
+   colorTo: blue
+   sdk: docker
+   app_port: 7860
+   pinned: false
+   ---
+
+   # OptiForge API
+   FastAPI backend for optiforge.ai (production / transportation / game-theory solver).
+   ```
+
+3. Upload the repository's root `Dockerfile`, `.dockerignore`, and the whole `backend` folder to the Space
+   (via the web UI: Add file > Upload files, or `git clone` the Space and copy them in).
+4. Add this Space secret under Settings > Variables and secrets (Repository secrets):
+   - `FRONTEND_ORIGINS=https://optiforge-ai.vercel.app,https://optiforge.ai,https://www.optiforge.ai`
+   - Skip `EXPLABS_API_KEY` / `SIMPLE_AI_API_KEY` for now — production examples solve without keys.
+5. Wait for the Space to build, then confirm `https://<space-owner>-<space-name>.hf.space/` returns `{"message":"OptiForge backend is working"}`.
+6. Set Vercel's `VITE_API_URL` to that Hugging Face URL instead of a Render URL.
 
 ## 4. Connect `optiforge.ai`
 

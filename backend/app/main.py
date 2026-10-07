@@ -15,7 +15,13 @@ app = FastAPI()
 
 frontend_origins = [
     origin.strip()
-    for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")).split(",")
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        os.getenv(
+            "FRONTEND_ORIGIN",
+            "http://localhost:5173,https://optiforge-ai.vercel.app,https://optiforge.ai,https://www.optiforge.ai",
+        ),
+    ).split(",")
     if origin.strip()
 ]
 
