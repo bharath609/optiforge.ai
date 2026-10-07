@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 import { solveLocally, type Analysis } from './lib/localSolver'
+import { configureAI, extractWithAI, isAIConfigured } from './lib/remoteAI'
+
+configureAI({
+  baseUrl: import.meta.env.VITE_AI_BASE_URL as string | undefined,
+  apiKey: import.meta.env.VITE_AI_API_KEY as string | undefined,
+  model: import.meta.env.VITE_AI_MODEL as string | undefined,
+})
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
@@ -38,7 +45,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [backend, setBackend] = useState<'checking' | 'online' | 'offline'>('checking')
   const [copied, setCopied] = useState(false)
-  const [solvedVia, setSolvedVia] = useState<'api' | 'browser' | null>(null)
+  const [solvedVia, setSolvedVia] = useState<'api' | 'ai' | 'browser' | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -93,7 +100,20 @@ function App() {
       // fall through to the built-in offline solver
     }
 
-    // 2) Offline engine: parse + solve right in the browser. No server, no key.
+    // 2) Browser-direct AI (free-form questions) when the owner configured a key.
+    if (isAIConfigured()) {
+      try {
+        const ai = await extractWithAI(problem)
+        setAnalysis(ai)
+        setSolvedVia('ai')
+        setLoading(false)
+        return
+      } catch {
+        // fall through to the built-in offline solver
+      }
+    }
+
+    // 3) Offline engine: parse + solve right in the browser. No server, no key.
     try {
       const local = solveLocally(problem)
       setAnalysis(local)
@@ -269,7 +289,8 @@ function App() {
 
           <div className="prompt-footer">
             <span>
-              {charCount.toLocaleString()} / 10,000 chars · No signup · Solves in your browser, no server needed
+              {charCount.toLocaleString()} / 10,000 chars · No signup ·{' '}
+              {isAIConfigured() ? 'AI assist on · solves free-form questions' : 'Solves in your browser, no server needed'}
             </span>
             <button className="btn btn-primary" onClick={handleSolve} disabled={loading} type="button">
               {loading ? (
@@ -313,7 +334,11 @@ function App() {
                 </div>
                 <div className="result-actions">
                   <span className="badge">
-                    {solvedVia === 'api' ? 'Solved via live API' : 'Solved in your browser'}
+                    {solvedVia === 'api'
+                      ? 'Solved via live API'
+                      : solvedVia === 'ai'
+                        ? 'Solved with AI'
+                        : 'Solved in your browser'}
                   </span>
                   <button className="btn btn-ghost btn-small" onClick={copyPlan} type="button">
                     {copied ? 'Copied ✓' : 'Copy plan'}

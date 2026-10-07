@@ -56,7 +56,7 @@ function parseResourceValues(text: string): Record<string, number> {
   return values;
 }
 
-interface ParsedProduct { name: string; profit: number; resource_usage: Record<string, number>; demand_limit: number | null }
+export interface ParsedProduct { name: string; profit: number; resource_usage: Record<string, number>; demand_limit: number | null }
 
 function parseProduction(text: string): { products: ParsedProduct[]; capacities: Record<string, number> } | null {
   const clean = text.replace(/\$/g, '');
@@ -100,7 +100,7 @@ function parseProduction(text: string): { products: ParsedProduct[]; capacities:
   return { products, capacities };
 }
 
-function solveProduction(products: ParsedProduct[], capacities: Record<string, number>): Analysis {
+export function solveProduction(products: ParsedProduct[], capacities: Record<string, number>): Analysis {
   const resources = Object.keys(capacities);
   const n = products.length;
   const c = products.map((p) => p.profit);
@@ -155,7 +155,7 @@ function solveProduction(products: ParsedProduct[], capacities: Record<string, n
 
 /* ---------------- transportation parsing + solving -------------------------- */
 
-interface TransportData {
+export interface TransportData {
   sources: { name: string; supply: number }[];
   destinations: { name: string; demand: number }[];
   costs: Record<string, Record<string, number>>;
@@ -204,7 +204,7 @@ export function parseTransportation(text: string): TransportData | null {
   return { sources, destinations, costs };
 }
 
-function solveTransportation(data: TransportData): Analysis {
+export function solveTransportation(data: TransportData): Analysis {
   const { sources, destinations, costs } = data;
   const totalSupply = sources.reduce((s, x) => s + x.supply, 0);
   const totalDemand = destinations.reduce((s, x) => s + x.demand, 0);
@@ -268,7 +268,7 @@ function solveTransportation(data: TransportData): Analysis {
 
 /* ---------------- game theory parsing + solving (port of backend) ----------- */
 
-function solveGameActions(
+export function solveGameActions(
   first: string,
   second: string,
   payoffs: Record<string, Record<string, number>>,

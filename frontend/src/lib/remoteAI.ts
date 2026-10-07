@@ -1,0 +1,184 @@
+/* Optional browser-direct AI extraction.
+   If the site owner sets VITE_AI_BASE_URL / VITE_AI_API_KEY / VITE_AI_MODEL
+   (e.g. a referrer-restricted Gemini key), free-form problems are sent to an
+   OpenAI-compatible /chat/completions endpoint, the returned model JSON is
+   validated, and the plan is solved locally in the browser.
+   Nothing here runs unless a key is configured. */
+
+import {
+  solveGameActions,
+  solveProduction,
+  solveTransportation,
+  type Analysis,
+} from './localSolver';
+
+interface AIConfig { baseUrl?: string; apiKey?: string; model?: string }
+
+let override: AIConfig | null = null;
+
+/** App entry-point calls this once with its (Vite) environment. Tests inject here too. */
+export function configureAI(config: AIConfig): void {
+  override = config;
+}
+
+function readConfig(): AIConfig {
+  return {
+    baseUrl: override?.baseUrl?.replace(/\/+$/, ''),
+    apiKey: override?.apiKey,
+    model: override?.model,
+  };
+}
+
+export function isAIConfigured(): boolean {
+  const c = readConfig();
+  return Boolean(c.baseUrl && c.apiKey && c.model);
+}
+
+const PROMPT = `You are an operations-research model classifier and mathematical formulation assistant. Read the business problem and return JSON only.
+
+Choose model_type as production, transportation, or game_theory. Return this envelope:
+{"model_type":"production|transportation|game_theory","problem_summary":string,"technique":string,"objective":string,"variables":[string],"constraints":[string],"assumptions":[string],"model":{...}}
+
+For production, model must be {"products":[{"name":string,"profit":number,"resource_usage":{resource:number},"demand_limit":number|null}],"capacities":{resource:number}}.
+For transportation, model must be {"sources":[{"name":string,"supply":number}],"destinations":[{"name":string,"demand":number}],"costs":{"source":{"destination":number}}}.
+For game_theory, model must be {"player_one_actions":[string],"player_two_actions":[string],"payoffs":{"player_one_action":{"player_two_action":number}},"zero_sum":true}. Use Player 1's payoff values and preserve negative payoffs.
+Use consistent names, preserve all stated numbers, and do not invent missing numbers. If the problem is neither supported type, return model_type as transportation only when it clearly describes shipping from sources to destinations; otherwise return a concise JSON error with {"error":"unsupported"}.
+
+User text:
+`;
+
+function stripCodeFence(content: string): string {
+  const m = /\{[\s\S]*\}/.exec(content);
+  return m ? m[0] : content;
+}
+
+interface AIModel {
+  model_type: 'production' | 'transportation' | 'game_theory';
+  model: Record<string, unknown>;
+  problem_summary?: string;
+  technique?: string;
+  objective?: string;
+  variables?: string[];
+  constraints?: string[];
+  assumptions?: string[];
+}
+
+function num(v: unknown): number {
+  const n = typeof v === 'string' ? parseFloat(v) : (v as number);
+  if (!Number.isFinite(n)) throw new Error('bad-number');
+  return n;
+}
+
+/** Validate the AI payload and solve it with the local engine. Throws on any problem. */
+export async function extractWithAI(problem: string): Promise<Analysis> {
+  const { baseUrl, apiKey, model } = readConfig();
+  if (!baseUrl || !apiKey || !model) throw new Error('AI is not configured.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: PROMPT + problem }],
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('The site AI key was rejected. The owner needs to check the key and its restrictions.');
+      }
+      if (response.status === 429) throw new Error('The free AI quota is used up right now. Try an example or come back later.');
+      throw new Error(`AI request failed (${response.status}). Falling back.`);
+    }
+    const payload = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = payload.choices?.[0]?.message?.content ?? '';
+    let parsed: AIModel & { error?: string };
+    try {
+      parsed = JSON.parse(stripCodeFence(content)) as AIModel & { error?: string };
+    } catch {
+      throw new Error('The AI returned an unusable model. Try rephrasing with exact numbers.');
+    }
+    if (parsed.error === 'unsupported') {
+      throw new Error('This business problem is not yet supported. Supported models are production planning, transportation, and game theory.');
+    }
+    const meta = {
+      problem_summary: parsed.problem_summary ?? '',
+      technique: parsed.technique ?? '',
+      objective: parsed.objective ?? '',
+      variables: parsed.variables ?? [],
+      constraints: parsed.constraints ?? [],
+      assumptions: parsed.assumptions ?? [],
+    };
+    if (parsed.model_type === 'production') {
+      const m = parsed.model as {
+        products?: { name?: unknown; profit?: unknown; resource_usage?: Record<string, unknown>; demand_limit?: unknown }[];
+        capacities?: Record<string, unknown>;
+      };
+      if (!m.products?.length || !m.capacities) throw new Error('bad-model');
+      const result = solveProduction(
+        m.products.map((p) => ({
+          name: String(p.name ?? 'Product'),
+          profit: num(p.profit),
+          resource_usage: Object.fromEntries(Object.entries(p.resource_usage ?? {}).map(([k, v]) => [k, num(v)])),
+          demand_limit: p.demand_limit == null ? null : num(p.demand_limit),
+        })),
+        Object.fromEntries(Object.entries(m.capacities).map(([k, v]) => [k, num(v)])),
+      );
+      return { ...result, ...meta, model_type: 'production' };
+    }
+    if (parsed.model_type === 'transportation') {
+      const m = parsed.model as {
+        sources?: { name?: unknown; supply?: unknown }[];
+        destinations?: { name?: unknown; demand?: unknown }[];
+        costs?: Record<string, Record<string, unknown>>;
+      };
+      if (!m.sources?.length || !m.destinations?.length || !m.costs) throw new Error('bad-model');
+      const result = solveTransportation({
+        sources: m.sources.map((s) => ({ name: String(s.name), supply: num(s.supply) })),
+        destinations: m.destinations.map((d) => ({ name: String(d.name), demand: num(d.demand) })),
+        costs: Object.fromEntries(
+          Object.entries(m.costs).map(([s, row]) => [s, Object.fromEntries(Object.entries(row).map(([d, v]) => [d, num(v)]))]),
+        ),
+      });
+      return { ...result, ...meta, model_type: 'transportation' };
+    }
+    if (parsed.model_type === 'game_theory') {
+      const m = parsed.model as {
+        player_one_actions?: unknown[];
+        player_two_actions?: unknown[];
+        payoffs?: Record<string, Record<string, unknown>>;
+      };
+      const p1 = (m.player_one_actions ?? []).map(String);
+      const p2 = (m.player_two_actions ?? []).map(String);
+      if (p1.length < 2 || p2.length < 2 || !m.payoffs) throw new Error('bad-model');
+      const payoffs: Record<string, Record<string, number>> = {};
+      for (const a of p1) {
+        payoffs[a] = {};
+        for (const b of p2) {
+          const v = m.payoffs[a]?.[b];
+          if (v == null) throw new Error('bad-model');
+          payoffs[a][b] = num(v);
+        }
+      }
+      const result = solveGameActions(p1[0], p1[1], payoffs);
+      void p2;
+      return { ...result, ...meta, model_type: 'game_theory' };
+    }
+    throw new Error('bad-model');
+  } catch (error) {
+    if (error instanceof Error && ['bad-model', 'bad-number'].includes(error.message)) {
+      throw new Error('The AI returned an unusable model. Try rephrasing with exact numbers.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
