@@ -1,7 +1,71 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import './App.css'
 import { solveLocally, type Analysis } from './lib/localSolver'
 import { configureAI, extractWithAI, isAIConfigured } from './lib/remoteAI'
+
+/* ---------- tiny inline icon set (no emoji, no deps) ---------- */
+function I({ d, size = 18, fill = false }: { d: string; size?: number; fill?: boolean }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? 'currentColor' : 'none'}
+      stroke="currentColor" strokeWidth={fill ? 0 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={d} />
+    </svg>
+  )
+}
+const LogoIcon = () => <I fill size={19} d="M12 2l2.7 7.3L22 12l-7.3 2.7L12 22l-2.7-7.3L2 12l7.3-2.7z" />
+const FactoryIcon = () => <I d="M3 21V10l5 3v-3l5 3V7h4v14zM7 17h2v2H7zm5 0h2v2h-2zm5 0h2v2h-2z" />
+const TruckIcon = () => <I d="M2 6h12v10H2zM14 10h4l4 4v2h-8zM6 19a1.6 1.6 0 100-3.2A1.6 1.6 0 006 19zm12 0a1.6 1.6 0 100-3.2A1.6 1.6 0 0018 19z" />
+const GameIcon = () => <I d="M6 12h4m-2-2v4m7-3h.01M18 13h.01M17.3 5H6.7a4 4 0 00-4 3.6L2 14a2.5 2.5 0 004.4 1.6L8 14h8l1.6 1.6A2.5 2.5 0 0022 14l-.7-5.4a4 4 0 00-4-3.6z" />
+const PenIcon = () => <I d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z" />
+const ZapIcon = () => <I d="M13 2L4 14h6l-1 8 9-12h-6z" />
+const CheckIcon = () => <I d="M20 6L9 17l-5-5" />
+const ArrowIcon = () => <I d="M5 12h14m-6-6l6 6-6 6" />
+const SparkIcon = () => <I size={13} d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />
+
+/* ---------- animated number ---------- */
+function CountUp({ value, decimals = 2, prefix = '', trim = false }: { value: number; decimals?: number; prefix?: string; trim?: boolean }) {
+  const [display, setDisplay] = useState(0)
+  const current = useRef(0)
+  useEffect(() => {
+    const from = current.current
+    const start = performance.now()
+    const dur = 1100
+    let raf = 0
+    const tick = (t: number) => {
+      const p = Math.min(1, (t - start) / dur)
+      const e = 1 - Math.pow(1 - p, 3)
+      const v = from + (value - from) * e
+      current.current = v
+      setDisplay(v)
+      if (p < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [value])
+  let text = display.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+  if (trim) text = text.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+  return <>{prefix}{text}</>
+}
+
+/* ---------- scroll reveal ---------- */
+function useReveal(dep: unknown) {
+  useEffect(() => {
+    const els = Array.from(document.querySelectorAll('.reveal:not(.visible)'))
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            e.target.classList.add('visible')
+            io.unobserve(e.target)
+          }
+        }
+      },
+      { threshold: 0.1 },
+    )
+    els.forEach((el) => io.observe(el))
+    return () => io.disconnect()
+  }, [dep])
+}
 
 configureAI({
   baseUrl: import.meta.env.VITE_AI_BASE_URL as string | undefined,
@@ -15,34 +79,46 @@ const EXAMPLES = [
   {
     label: 'Furniture workshop',
     tag: 'Production · works instantly',
+    icon: 'factory' as const,
     prompt:
       'Product A gives 40 profit and needs 2 units Machine and 1 units Labor. Product B gives 30 profit and needs 1 units Machine and 2 units Labor. We have 100 units Machine and 80 units Labor. Demand for A at most 40.',
   },
   {
     label: 'Bakery plan',
     tag: 'Production · works instantly',
+    icon: 'factory' as const,
     prompt:
       'Product Bread gives 25 profit and needs 3 units Oven and 2 units Labor. Product Cake gives 45 profit and needs 4 units Oven and 3 units Labor. We have 120 units Oven and 90 units Labor. Demand for Cake at most 20.',
   },
   {
     label: 'Electronics line',
     tag: 'Production · works instantly',
+    icon: 'factory' as const,
     prompt:
       'Product Phone gives 120 profit and needs 2 units Chips and 1 units Assembly. Product Tablet gives 100 profit and needs 1 units Chips and 2 units Assembly. We have 200 units Chips and 180 units Assembly.',
   },
   {
     label: 'Shipping plan',
     tag: 'Transportation · works instantly',
+    icon: 'truck' as const,
     prompt:
       'Warehouse A has supply 100. Warehouse B has supply 150. Store X needs demand 120. Store Y needs demand 130. Shipping costs: A to X costs 4, A to Y costs 6, B to X costs 5, B to Y costs 3.',
   },
   {
     label: 'Free-form chairs',
     tag: 'Production · any wording',
+    icon: 'pen' as const,
     prompt:
       'We make chairs and tables. Each chair earns 40 profit and takes 2 wood and 1 labor. Each table earns 30 profit and takes 1 wood and 2 labor. We have 100 wood and 80 labor available. Max 40 chairs can be sold.',
   },
 ]
+
+function ExampleIcon({ kind }: { kind: 'factory' | 'truck' | 'pen' | 'game' }) {
+  if (kind === 'truck') return <TruckIcon />
+  if (kind === 'pen') return <PenIcon />
+  if (kind === 'game') return <GameIcon />
+  return <FactoryIcon />
+}
 
 function App() {
   const [problem, setProblem] = useState('')
@@ -165,11 +241,19 @@ function App() {
 
   const charCount = problem.length
 
+  useReveal(`${loading}-${analysis ? analysis.explanation : 'none'}-${backend}`)
+
   return (
     <div className="page">
+      <div className="aurora" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </div>
+      <div className="grid-overlay" aria-hidden />
       <header className="navbar">
         <div className="brand">
-          <span className="brand-mark">◈</span>
+          <span className="brand-mark"><LogoIcon /></span>
           <span>
             optiforge.ai
             <small>Operations research, simplified</small>
@@ -195,7 +279,7 @@ function App() {
 
       <main>
         <section className="hero">
-          <div className="hero-copy">
+          <div className="hero-copy reveal">
             <p className="eyebrow">
               <span className="pulse" /> AI-POWERED OPERATIONS RESEARCH
             </p>
@@ -203,15 +287,15 @@ function App() {
               Turn operational complexity into <span className="gradient">clear decisions.</span>
             </h1>
             <p className="hero-text">
-              Describe your business problem in plain English. OptiForge identifies the right model —
-              production, transportation, or game theory — and returns a mathematically optimal plan in seconds.
+              Describe your business problem in <strong>plain English — any wording works</strong>. OptiForge identifies the right model —
+              production, transportation, or game theory — and returns a <strong>mathematically optimal plan</strong> in seconds.
             </p>
             <div className="hero-actions">
               <a className="btn btn-primary" href="#solver">
-                Solve my plan <span aria-hidden>→</span>
+                Solve my plan <span aria-hidden><ArrowIcon /></span>
               </a>
               <button className="btn btn-ghost" onClick={() => useExample(EXAMPLES[0].prompt)} type="button">
-                Try a live example
+                <PenIcon /> Try a live example
               </button>
             </div>
             <div className="hero-stats">
@@ -229,51 +313,55 @@ function App() {
               </div>
             </div>
           </div>
-          <div className="hero-card" aria-hidden>
-            <div className="hero-card-head">
-              <span />
-              <span />
-              <span />
-              <em>optimal plan · production</em>
-            </div>
-            <div className="hero-card-body">
-              <div className="hero-metric">
-                <span>Total profit</span>
-                <strong>$2,200.00</strong>
+          <div className="hero-card-wrap reveal">
+            <span className="float-chip fc-1"><SparkIcon /> optimal <b>mix found</b></span>
+            <div className="hero-card" aria-hidden>
+              <div className="hero-card-head">
+                <span />
+                <span />
+                <span />
+                <span className="live-dot"><i />LIVE SOLVE</span>
               </div>
-              <div className="hero-bar">
-                <div>
-                  <span>Product A</span>
-                  <span>40 units</span>
+              <div className="hero-card-body">
+                <div className="hero-metric-label">
+                  <span>TOTAL PROFIT</span>
+                  <em>LP · OPTIMAL</em>
                 </div>
-                <i>
-                  <b style={{ width: '82%' }} />
-                </i>
-              </div>
-              <div className="hero-bar">
-                <div>
-                  <span>Product B</span>
-                  <span>20 units</span>
+                <strong><CountUp value={2200} decimals={2} prefix="$" /></strong>
+                <span className="hero-delta">▲ +18.4% vs heuristic plan</span>
+                <div className="hero-bar">
+                  <div className="hero-bar-head">
+                    <span><i style={{ background: '#3ef0b0' }} />Product A</span>
+                    <span>40 units · $1,600</span>
+                  </div>
+                  <i className="track"><b style={{ '--w': '84%' } as CSSProperties} /></i>
                 </div>
-                <i>
-                  <b style={{ width: '54%' }} />
-                </i>
+                <div className="hero-bar">
+                  <div className="hero-bar-head">
+                    <span><i style={{ background: '#6aa8ff' }} />Product B</span>
+                    <span>20 units · $600</span>
+                  </div>
+                  <i className="track"><b style={{ '--w': '52%' } as CSSProperties} /></i>
+                </div>
+                <div className="hero-card-foot">
+                  <ZapIcon /> Limiting resource: Machine · 100% utilized
+                </div>
               </div>
-              <p>Limiting resource: Machine · 100% utilized</p>
             </div>
+            <span className="float-chip fc-2"><CheckIcon /> HiGHS verified optimal</span>
           </div>
         </section>
 
-        <section className="trust">
-          <span>Built for</span>
-          <strong>Manufacturing</strong>
-          <strong>Logistics</strong>
-          <strong>Retail planning</strong>
-          <strong>Studios &amp; agencies</strong>
-          <strong>Founders</strong>
+        <section className="trust reveal">
+          <span>BUILT FOR</span>
+          <strong><SparkIcon /> Manufacturing</strong>
+          <strong><SparkIcon /> Logistics</strong>
+          <strong><SparkIcon /> Retail planning</strong>
+          <strong><SparkIcon /> Studios &amp; agencies</strong>
+          <strong><SparkIcon /> Founders</strong>
         </section>
 
-        <section className="prompt-card" id="solver">
+        <section className="prompt-card reveal" id="solver">
           <div className="prompt-heading">
             <div>
               <h2>What would you like to optimize?</h2>
@@ -292,8 +380,11 @@ function App() {
           <div className="examples">
             {EXAMPLES.map((ex) => (
               <button key={ex.label} type="button" className="example-chip" onClick={() => useExample(ex.prompt)}>
-                <strong>{ex.label}</strong>
-                <span>{ex.tag}</span>
+                <span className="ex-ico"><ExampleIcon kind={ex.icon} /></span>
+                <span className="ex-text">
+                  <strong>{ex.label}</strong>
+                  <span>{ex.tag}</span>
+                </span>
               </button>
             ))}
           </div>
@@ -310,7 +401,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  Solve my plan <span aria-hidden>→</span>
+                  Solve my plan <span aria-hidden><ArrowIcon /></span>
                 </>
               )}
             </button>
@@ -342,7 +433,7 @@ function App() {
         )}
 
         {analysis && !loading && (
-          <section className="results" aria-live="polite">
+          <section className="results" aria-live="polite" key={analysis.explanation}>
             <div className="result-panel formulation">
               <div className="formulation-head">
                 <div>
@@ -396,7 +487,7 @@ function App() {
                   </div>
                   <div className="profit">
                     <span>Expected payoff</span>
-                    <strong>{analysis.game_value}</strong>
+                    <strong><CountUp value={analysis.game_value ?? 0} decimals={4} trim /></strong>
                   </div>
                 </div>
                 <p className="explanation">{analysis.explanation}</p>
@@ -420,7 +511,7 @@ function App() {
                   <div className="profit">
                     <span>Total shipping cost</span>
                     <strong>
-                      ${analysis.total_cost?.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      <CountUp value={analysis.total_cost ?? 0} decimals={2} prefix="$" />
                     </strong>
                   </div>
                 </div>
@@ -450,7 +541,7 @@ function App() {
                   <div className="profit">
                     <span>Total profit</span>
                     <strong>
-                      ${analysis.total_profit?.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      <CountUp value={analysis.total_profit ?? 0} decimals={2} prefix="$" />
                     </strong>
                   </div>
                 </div>
@@ -471,10 +562,10 @@ function App() {
                       <div className="resource" key={resource.name}>
                         <div className="metric-row">
                           <span>{resource.name}</span>
-                          <strong>{Math.round(resource.utilization * 100)}%</strong>
+                          <strong className="hl">{Math.round(resource.utilization * 100)}%</strong>
                         </div>
                         <div className="bar">
-                          <i style={{ width: `${Math.min(resource.utilization * 100, 100)}%` }} />
+                          <i style={{ '--w': `${Math.min(resource.utilization * 100, 100)}%` } as CSSProperties} />
                         </div>
                         <small>
                           {resource.used} of {resource.capacity} available
@@ -488,38 +579,44 @@ function App() {
           </section>
         )}
 
-        <section className="features" id="how">
+        <section className="features reveal" id="how">
           <article>
-            <span>01</span>
+            <span className="step-ico"><PenIcon /></span>
+            <span className="f-num">01</span>
             <h3>Describe</h3>
             <p>Write your planning problem naturally, just as you would explain it to a colleague. No math needed.</p>
           </article>
           <article>
-            <span>02</span>
+            <span className="step-ico"><ZapIcon /></span>
+            <span className="f-num">02</span>
             <h3>Optimize</h3>
             <p>AI classifies the model while the HiGHS solver finds the mathematically best plan — not a guess.</p>
           </article>
           <article>
-            <span>03</span>
+            <span className="step-ico"><CheckIcon /></span>
+            <span className="f-num">03</span>
             <h3>Decide</h3>
             <p>Get quantities, costs, utilization, and the reasoning behind them. Copy and share with your team.</p>
           </article>
         </section>
 
-        <section className="use-cases" id="use-cases">
+        <section className="use-cases reveal" id="use-cases">
           <p className="eyebrow">WHERE IT HELPS</p>
           <h2>One input box, three powerful solvers.</h2>
           <div className="use-grid">
             <div>
-              <h3>🏭 Production planning</h3>
+              <span className="use-ico"><FactoryIcon /></span>
+              <h3>Production planning</h3>
               <p>Maximize profit under machine hours, labor, materials, and demand caps.</p>
             </div>
             <div>
-              <h3>🚚 Transportation</h3>
+              <span className="use-ico"><TruckIcon /></span>
+              <h3>Transportation</h3>
               <p>Minimize shipping cost across warehouses, stores, supplies, and demands.</p>
             </div>
             <div>
-              <h3>🎮 Game theory</h3>
+              <span className="use-ico"><GameIcon /></span>
+              <h3>Game theory</h3>
               <p>Find optimal mixed strategies and guaranteed payoffs for competitive decisions.</p>
             </div>
           </div>
@@ -534,7 +631,7 @@ function App() {
       <footer>
         <div className="foot-inner">
           <div className="brand">
-            <span className="brand-mark">◈</span> optiforge.ai
+            <span className="brand-mark"><LogoIcon /></span> optiforge.ai
           </div>
           <p>Open-source operations research for everyone. Built with React, FastAPI, and HiGHS.</p>
           <div className="foot-links">
