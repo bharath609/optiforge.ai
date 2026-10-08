@@ -35,6 +35,11 @@ export function isAIConfigured(): boolean {
 }
 
 const PROMPT = `You are an operations-research model classifier and mathematical formulation assistant. Read the business problem and return JSON only.
+Users phrase problems freely in their own words — never require rigid templates like "Product A".
+Understand synonyms: profit = profit/margin/earn/yield/contribution/gain/revenue; needs = needs/uses/requires/consumes/takes; have = have/available/in stock/capacity/total/limited to.
+Product names can be anything (chairs, bread, phones, X1). Resource names can be anything (wood, machine hours, labour, oven).
+Normalize them into the model, keep every stated number exact, never invent missing numbers.
+This site only solves optimization problems (production, transportation, game theory) — never general math.
 
 Choose model_type as production, transportation, or game_theory. Return this envelope:
 {"model_type":"production|transportation|game_theory","problem_summary":string,"technique":string,"objective":string,"variables":[string],"constraints":[string],"assumptions":[string],"model":{...}}
@@ -42,7 +47,7 @@ Choose model_type as production, transportation, or game_theory. Return this env
 For production, model must be {"products":[{"name":string,"profit":number,"resource_usage":{resource:number},"demand_limit":number|null}],"capacities":{resource:number}}.
 For transportation, model must be {"sources":[{"name":string,"supply":number}],"destinations":[{"name":string,"demand":number}],"costs":{"source":{"destination":number}}}.
 For game_theory, model must be {"player_one_actions":[string],"player_two_actions":[string],"payoffs":{"player_one_action":{"player_two_action":number}},"zero_sum":true}. Use Player 1's payoff values and preserve negative payoffs.
-Use consistent names, preserve all stated numbers, and do not invent missing numbers. If the problem is neither supported type, return model_type as transportation only when it clearly describes shipping from sources to destinations; otherwise return a concise JSON error with {"error":"unsupported"}.
+Use consistent names, preserve all stated numbers, and do not invent missing numbers. If the problem is general math or otherwise neither supported type, return a concise JSON error with {"error":"unsupported"}.
 
 User text:
 `;

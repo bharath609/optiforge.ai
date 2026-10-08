@@ -36,6 +36,12 @@ const EXAMPLES = [
     prompt:
       'Warehouse A has supply 100. Warehouse B has supply 150. Store X needs demand 120. Store Y needs demand 130. Shipping costs: A to X costs 4, A to Y costs 6, B to X costs 5, B to Y costs 3.',
   },
+  {
+    label: 'Free-form chairs',
+    tag: 'Production · any wording',
+    prompt:
+      'We make chairs and tables. Each chair earns 40 profit and takes 2 wood and 1 labor. Each table earns 30 profit and takes 1 wood and 2 labor. We have 100 wood and 80 labor available. Max 40 chairs can be sold.',
+  },
 ]
 
 function App() {
@@ -64,11 +70,11 @@ function App() {
 
   async function handleSolve() {
     if (!problem.trim()) {
-      setMessage('Please describe your production-planning problem first, or try one of the examples below.')
+      setMessage('Describe your optimization problem in your own words first — what you make or ship, your limits, and costs — or try one of the examples below. Note: this solver handles production, transportation, and game-theory optimization only, not general math.')
       return
     }
     if (problem.trim().length < 10) {
-      setMessage('Please add a little more detail — profits, resources and capacities help the solver.')
+      setMessage('Please add a little more detail in any wording — e.g. profits, what each item needs, and what you have available.')
       return
     }
 
@@ -271,7 +277,7 @@ function App() {
           <div className="prompt-heading">
             <div>
               <h2>What would you like to optimize?</h2>
-              <p>Include decisions, constraints, costs, demand, and locations if you know them.</p>
+              <p>Use your own words — no fixed format needed. Production, transportation, or game-theory optimization only (not general math).</p>
             </div>
             <span className="badge">AI model selection + HiGHS solver</span>
           </div>
@@ -279,7 +285,7 @@ function App() {
           <textarea
             value={problem}
             onChange={(event) => setProblem(event.target.value)}
-            placeholder="Example: Product A gives 40 profit and needs 2 units Machine and 1 units Labor. Product B gives 30 profit and needs 1 units Machine and 2 units Labor. We have 100 units Machine and 80 units Labor."
+            placeholder="Example in your own words: We make chairs (40 profit, 2 wood + 1 labor) and tables (30 profit, 1 wood + 2 labor). We have 100 wood and 80 labor."
             maxLength={10000}
           />
 
@@ -294,8 +300,8 @@ function App() {
 
           <div className="prompt-footer">
             <span>
-              {charCount.toLocaleString()} / 10,000 chars · No signup ·{' '}
-              {isAIConfigured() ? 'AI assist on · solves free-form questions' : 'Solves in your browser, no server needed'}
+              {charCount.toLocaleString()} / 10,000 chars · No signup · Any wording works ·{' '}
+              {isAIConfigured() ? 'AI assist on' : 'Offline solver ready'}
             </span>
             <button className="btn btn-primary" onClick={handleSolve} disabled={loading} type="button">
               {loading ? (
@@ -518,8 +524,9 @@ function App() {
             </div>
           </div>
           <p className="note">
-            All three model types solve instantly in your browser — no signup, no server, no API key.
-            Connect the optional FastAPI backend with GPT-6 Astra for free-form descriptions.
+            All three model types understand your own wording instantly in your browser — no signup, no server, no API key.
+            Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff. General math (equations, calculus) is out of scope.
+            Connect the optional FastAPI backend with GPT-6 Astra for extra AI understanding of very long descriptions.
           </p>
         </section>
       </main>

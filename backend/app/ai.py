@@ -23,7 +23,7 @@ async def extract_model(problem: str) -> BusinessModel:
         try:
             return _extract_with_fallback(problem)
         except ValueError as error:
-            raise ValueError("The lightweight model could not understand this simple problem. Check SIMPLE_AI_API_KEY or provide clearer values.") from error
+            raise ValueError(str(error)) from error
 
     api_key = os.getenv("EXPLABS_API_KEY")
     if api_key:
@@ -38,6 +38,15 @@ def _is_complex_problem(problem: str) -> bool:
     text = problem.strip()
     numeric_values = re.findall(r"-?\d+(?:\.\d+)?", text)
     return len(text) > 700 or len(text.split()) > 120 or len(numeric_values) > 16
+
+
+FREE_FORM_GUIDANCE = """Users phrase problems freely in their own words — never require rigid templates like "Product A".
+Understand synonyms: profit = profit/margin/earn/yield/contribution/gain/revenue/price;
+needs = needs/uses/requires/consumes/takes; have = have/available/in stock/capacity/total/limited to.
+Product names can be anything (chairs, bread, phones, X1...). Resource names can be anything
+(wood, machine hours, labour, oven...). Normalize them, keep numbers exact, never invent numbers.
+If the text is general math (equations, calculus) rather than production/transportation/game-theory
+optimization, return {"error":"unsupported"}."""
 
 
 async def _extract_with_provider(
@@ -56,10 +65,9 @@ Choose model_type as production, transportation, or game_theory. Return this env
 For production, model must be {"products":[{"name":string,"profit":number,"resource_usage":{resource:number},"demand_limit":number|null}],"capacities":{resource:number}}.
 For transportation, model must be {"sources":[{"name":string,"supply":number}],"destinations":[{"name":string,"demand":number}],"costs":{"source":{"destination":number}}}.
 For game_theory, model must be {"player_one_actions":[string],"player_two_actions":[string],"payoffs":{"player_one_action":{"player_two_action":number}},"zero_sum":true}. Use Player 1's payoff values and preserve negative payoffs.
-Use consistent names, preserve all stated numbers, and do not invent missing numbers. If the problem is neither supported type, return model_type as transportation only when it clearly describes shipping from sources to destinations; otherwise return a concise JSON error with {"error":"unsupported"}.
+Use consistent names, preserve all stated numbers, and do not invent missing numbers. If the problem is neither supported type, return a concise JSON error with {"error":"unsupported"}.
 
-User text:
-""" + problem
+""" + FREE_FORM_GUIDANCE + "\n\nUser text:\n" + problem
     request = Request(
         f"{base_url}/chat/completions",
         data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0}).encode(),
@@ -75,7 +83,7 @@ User text:
     content = await asyncio.to_thread(call_provider)
     payload = json.loads(_strip_code_fence(content))
     if payload.get("error") == "unsupported":
-        raise ValueError("This business problem is not yet supported. Supported models are production planning and transportation.")
+        raise ValueError("OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
     return BusinessModel.model_validate(payload)
 
 
@@ -84,13 +92,324 @@ def _strip_code_fence(content: str) -> str:
     return match.group(0) if match else content
 
 
+STOP_WORDS = {
+    "the", "a", "an", "each", "every", "per", "of", "for", "with", "and", "or",
+    "to", "from", "in", "on", "is", "are", "it", "its", "we", "our", "you",
+    "that", "this", "which", "using", "uses", "use", "needs", "need", "requires",
+    "require", "consumes", "consume", "takes", "take", "profit", "profits",
+    "margin", "earn", "earns", "gives", "give", "yields", "makes", "make",
+    "units", "unit", "hours", "hour", "hrs", "hr", "kg", "kgs", "tons", "ton",
+}
+
+
+def _clean_name(raw: str) -> str:
+    s = re.sub(r"\s+", " ", raw.strip())
+    s = re.sub(r"^(the|a|an|each|every|our|your|my)\s+", "", s, flags=re.I)
+    # strip trailing verbs/adjectives captured by lazy regexes ("Factory A can" -> "Factory A")
+    s = re.sub(
+        r"\s+(can|has|have|with|holds?|stocks?|suppl\w*|supply|produces?|makes?|offers?|provides?|needs?|requires?|demands?|demand|orders?|wants?)$",
+        "", s, flags=re.I,
+    )
+    return s.strip()
+
+
+def _canon(s: str) -> str:
+    norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+    stripped = re.sub(r"\s+", " ", re.sub(
+        r"\b(units?|hours?|hrs?|hr|kg|kgs|tons?|tonnes?|days?|minutes?|mins?)\b", " ", norm,
+    )).strip()
+    return stripped or norm
+
+
+def _profit_from_sentence(sentence: str) -> float | None:
+    m = re.search(
+        r"(?:profit|margin|earning|contribution|gain)\s+(?:per|for|of|on)\s+[A-Za-z0-9\- ]+?\s+(?:is|=|:)\s*\$?\s*(\d+(?:\.\d+)?)",
+        sentence, re.I,
+    )
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:profit|margin|earned|earnings|contribution)", sentence, re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(
+        r"(?:profit|margin|earning|contribution|gain|revenue|nets?|earns?|yields?|makes?|gives?|price|value)"
+        r"(?:\s*(?:per|for|of|on|is|:|=))?\s*\$?\s*(\d+(?:\.\d+)?)",
+        sentence, re.I,
+    )
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _product_name_from_sentence(sentence: str, fallback: str) -> str:
+    m = re.search(r"(product\s+[A-Za-z0-9\-]+)", sentence, re.I)
+    if m:
+        return _clean_name(m.group(1))
+    # "Profit per X1 is 40" — exact single-token name (avoids lazy-match traps like "X")
+    m = re.search(
+        r"(?:profit|margin|earning|contribution|gain)\s+(?:per|for|of|on)\s+(?:of\s+)?([A-Za-z][A-Za-z0-9\-]*)",
+        sentence, re.I,
+    )
+    if m and m.group(1).strip().lower() not in STOP_WORDS:
+        return _clean_name(m.group(1))
+    # "Mango Smoothie for a profit of 50" — up to 3 words before "for a profit"
+    m = re.search(
+        r"([A-Za-z][A-Za-z0-9\-]*(?:\s+[A-Za-z][A-Za-z0-9\-]*){0,2})\s+for\s+a\s+(?:profit|margin)\s+of\s+\$?\d",
+        sentence, re.I,
+    )
+    if m:
+        cand = _clean_name(re.sub(r"^(sells?|makes?|produces?|offers?|manufactures?|provides?)\s+", "", m.group(1), flags=re.I))
+        last = (cand.lower().split(" ") or [""])[-1]
+        if cand and len(cand) <= 30 and last not in STOP_WORDS:
+            return cand
+    m = re.search(
+        r"([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s+(?:gives?|earns?|yields?|makes?|brings?|fetches?|nets?)\s+(?:a\s+)?(?:profit\s+(?:of\s+)?)?\$?\d",
+        sentence, re.I,
+    )
+    if m and m.group(1).strip().lower() not in STOP_WORDS:
+        return _clean_name(m.group(1))
+    m = re.search(
+        r"(?:profit|margin|earning|contribution|gain)(?:\s*(?:per|for|of|on))?\s+(?:of\s+)?([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s+(?:is|=|:|of)\s*\$?\d",
+        sentence, re.I,
+    )
+    if m and m.group(1).strip().lower() not in STOP_WORDS:
+        cand = _clean_name(re.sub(r"\s+(is|are|of|at)$", "", m.group(1), flags=re.I))
+        if cand and len(cand) <= 30:
+            return cand
+    m = re.search(r"([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s*[:\-–]\s*\$?\d+(?:\.\d+)?\s*(?:profit|margin)", sentence, re.I)
+    if m:
+        return _clean_name(m.group(1))
+    # "bread margin 25" / "chairs profit 40" — name before the keyword
+    m = re.search(
+        r"([A-Za-z][A-Za-z0-9\-]*)\s+(?:profit|margin|earning|contribution)s?\s*(?:is|=|:|of)?\s*\$?\d+(?:\.\d+)?",
+        sentence, re.I,
+    )
+    if m and m.group(1).strip().lower() not in STOP_WORDS:
+        return _clean_name(m.group(1))
+    m = re.search(r"(?:each|every|one|per)\s+([A-Za-z][A-Za-z0-9\-]*)", sentence, re.I)
+    if m and m.group(1).strip().lower() not in STOP_WORDS:
+        return _clean_name(m.group(1))
+    return fallback
+
+
+def _usage_free_form(segment: str, exclude_value: float | None) -> dict[str, float]:
+    usage: dict[str, float] = {}
+    skipped = False
+    for m in re.finditer(
+        r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|kg|kgs|tons?|tonnes?|units?|days?|minutes?|mins?)?\s*(?:of\s+)?([A-Za-z][A-Za-z][\w\- ]*?)(?=\s*(?:and|,|;|\.|$|\+|needs?|uses?|requires?|consumes?|takes?|per))",
+        segment, re.I,
+    ):
+        value = float(m.group(1))
+        resource = re.sub(r"\s+per\s+unit.*$", "", m.group(3) or "", flags=re.I).strip()
+        resource = re.sub(r"^(units?|hours?|hrs?|kg)\s+", "", resource, flags=re.I).strip()
+        low = resource.lower()
+        if not resource or len(resource) > 40:
+            continue
+        if re.match(r"^(per|each|every)\b", resource, re.I):
+            continue
+        if "profit" in low or "margin" in low or "earn" in low or "revenue" in low:
+            continue
+        if low in STOP_WORDS:
+            continue
+        if exclude_value is not None and not skipped and abs(value - exclude_value) < 1e-9:
+            skipped = True
+            continue
+        name = _clean_name(resource)
+        if name:
+            usage[name] = value
+    return usage
+
+
+def _parse_capacities_free(text: str) -> dict[str, float]:
+    caps: dict[str, float] = {}
+    sentences = text.replace("$", "").split(".")
+    for raw in re.split(r"[.\n;]+", text.replace("$", "")):
+        s = raw.strip()
+        if not s:
+            continue
+        is_product_line = re.search(r"profit|margin|earn|contribution", s, re.I)
+        has_hint = re.search(r"have|available|in stock|on hand|capacity|capacities|at most|up to|limited|limit|maximum|total|only|supply\b", s, re.I)
+        if is_product_line and not has_hint:
+            continue
+        if not has_hint and ":" not in s and not re.search(r"<=?", s):
+            continue
+        for m in re.finditer(
+            r"([A-Za-z][A-Za-z ]{1,30}?)\s+(?:capacity|available|in stock|on hand)\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?|hours?|hrs?|kg|tons?)?",
+            s, re.I,
+        ):
+            name = _clean_name(re.sub(r"^(we|they|factory|we have|available|total|capacity of|capacity)\s+", "", m.group(1), flags=re.I))
+            if not name or name.lower() in STOP_WORDS or re.search(r"profit|margin|demand|supply", name, re.I):
+                continue
+            if len(name) > 40:
+                continue
+            caps.setdefault(name, float(m.group(2)))
+        for m in re.finditer(
+            r"([A-Za-z][A-Za-z ]{1,30}?)\s*(?:capacity|available|in stock|on hand)?\s*(?:<=|<|:|=|is|of)\s*(\d+(?:\.\d+)?)\s*(?:units?|hours?|hrs?|kg|tons?)?",
+            s, re.I,
+        ):
+            name = _clean_name(re.sub(r"^(we|they|factory|we have|available|total|capacity of|capacity)\s+", "", m.group(1), flags=re.I))
+            if not name or name.lower() in STOP_WORDS or re.search(r"profit|margin|demand|supply", name, re.I):
+                continue
+            if len(name) > 40:
+                continue
+            caps[name] = float(m.group(2))
+        for m in re.finditer(
+            r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*(units?|hours?|hrs?|hr|kg|kgs|tons?|tonnes?|days?)?\s*(?:of\s+)?([A-Za-z][A-Za-z][\w\- ]*?)(?=\s*(?:and|,|;|$|available|in stock|capacity|at most|maximum|total))",
+            s, re.I,
+        ):
+            if re.search(r"profit|margin|demand|supply|product", m.group(3), re.I):
+                continue
+            name = _clean_name(m.group(3))
+            if not name or name.lower() in STOP_WORDS or len(name) > 40:
+                continue
+            caps.setdefault(name, float(m.group(1)))
+        for key, value in _parse_resource_values(s).items():
+            if re.search(r"profit|demand|supply", key, re.I):
+                continue
+            caps.setdefault(key, value)
+    cap_match = re.search(r"We have (.*?)(?:Demand|$)", text, re.I)
+    if cap_match:
+        for key, value in _parse_resource_values(cap_match.group(1)).items():
+            caps.setdefault(key, value)
+    return caps
+
+
+def _parse_demand_free(text: str, product_label: str) -> float | None:
+    label = re.sub(r"^product\s+", "", product_label, flags=re.I).strip()
+    last_word = (label.split() or [label])[-1]
+    base = [product_label, label, last_word]
+    cands: list[str] = []
+    for b in base:
+        if not b:
+            continue
+        cands.append(b)
+        # plural/singular tolerant: "cake" also matches "cakes"
+        if re.search(r"s$", b, re.I) and len(b) > 3:
+            cands.append(b[:-1])
+        else:
+            cands.append(b + "s")
+    for cand in cands:
+        e = re.escape(cand)
+        for pattern in [
+            rf"demand(?:\s+for)?\s+{e}\s*(?:is\s+)?(?:at most|max(?:imum)?|cannot exceed|up to|of|is|:|=|<=?)\s*(\d+(?:\.\d+)?)",
+            rf"{e}\s*(?:demand)?\s*(?:at most|max(?:imum)?|cannot exceed|up to|limit(?:ed to)?|<=|<)\s*(\d+(?:\.\d+)?)",
+            rf"(?:at most|max(?:imum)?|up to|no more than)\s*(\d+(?:\.\d+)?)\s*(?:units?\s+)?(?:of\s+)?{e}",
+        ]:
+            m = re.search(pattern, text, re.I)
+            if m:
+                return float(m.group(1))
+    return None
+
+
+def _split_product_clauses(sentence: str) -> list[str]:
+    """Split "Profit per X1 is 40, profit per X2 is 30" into per-product clauses."""
+    parts = re.split(
+        r",(?=\s*(?:and\s+)?(?:profit|margin|each|every|product\b))|\s+and\s+(?=[A-Za-z][A-Za-z0-9\- ]{0,30}?\s+for\s+a\s+(?:profit|margin))",
+        sentence, flags=re.I,
+    )
+    if len(parts) <= 1:
+        return [sentence]
+    with_profit = [p for p in parts if _profit_from_sentence(p) is not None]
+    if len(with_profit) > 1:
+        return [p.strip() for p in parts if p.strip()]
+    return [sentence]
+
+
+def _attach_split_needs(clean: str, products: list[dict]) -> None:
+    """Attach "X1 requires 2 machine hours..." lines to profit-only products by name."""
+    needy = [p for p in products if not p["resource_usage"]]
+    if not needy:
+        return
+    for raw in re.split(r"[.\n;]+", clean):
+        sentence = raw.strip()
+        if not sentence or re.search(r"profit|margin|earn|contribution|gain|revenue", sentence, re.I):
+            continue
+        need_match = re.match(
+            r"\s*(?:for\s+)?([A-Za-z][A-Za-z0-9\-]*)\s+(?:needs?|uses?|requires?|consumes?|takes?|takes up|spends?)\s+(.*)",
+            sentence, re.I,
+        )
+        if not need_match:
+            continue
+        name_raw, usage_text = need_match.groups()
+        usage = _usage_free_form(usage_text, None)
+        if not usage:
+            continue
+        target = next((p for p in needy if _canon_hit(p["name"], _clean_name(name_raw))), None)
+        if target:
+            target["resource_usage"] = usage
+
+
+def _canon_hit(a: str, b: str) -> bool:
+    ka, kb = _canon(a), _canon(b)
+    if not ka or not kb:
+        return bool(ka and ka == kb)
+    if ka == kb:
+        return True
+    if len(kb) >= 3 and kb in ka:
+        return True
+    if len(ka) >= 3 and ka in kb:
+        return True
+    return False
+
+
+def _parse_production_free(text: str):
+    clean = text.replace("$", "")
+    products: list[dict] = []
+    auto_idx = 0
+    for raw in re.split(r"[.\n;]+", clean):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        for clause in _split_product_clauses(sentence):
+            if not re.search(r"profit|margin|earn|contribution|gain|revenue", clause, re.I):
+                continue
+            if re.match(r"(?i)^(we have|available|in stock|capacity|total)", clause) and not re.search(r"needs?|uses?|requires?|consumes?|takes?|gives?|earns?|yields?|makes?", clause, re.I):
+                continue
+            profit = _profit_from_sentence(clause)
+            if profit is None or profit < 0:
+                continue
+            auto_idx += 1
+            name = _product_name_from_sentence(clause, f"Product {chr(64 + auto_idx)}")
+            need_match = re.search(r"(?:needs?|uses?|requires?|consumes?|takes?|takes up|spends?)\s+(.*)", clause, re.I)
+            usage = _usage_free_form(need_match.group(1) if need_match else clause, profit)
+            if not usage:
+                # profit-only clause (usage lives in another sentence) — remember for phase 2
+                if not any(_canon(p["name"]) == _canon(name) for p in products):
+                    products.append({"name": name, "profit": profit, "resource_usage": {}, "demand_limit": None})
+                continue
+            if any(_canon(p["name"]) == _canon(name) for p in products):
+                continue
+            products.append({"name": name, "profit": profit, "resource_usage": usage, "demand_limit": None})
+    # Phase 2: attach split needs-lines, then drop profit-only entries without usage.
+    _attach_split_needs(clean, products)
+    products = [p for p in products if p["resource_usage"]]
+    if not products:
+        return None
+    capacities = _parse_capacities_free(clean)
+    for product in products:
+        for res in list(product["resource_usage"]):
+            if res in capacities:
+                continue
+            hit = next((c for c in capacities if _canon_hit(c, res)), None)
+            if hit:
+                product["resource_usage"][hit] = product["resource_usage"].pop(res)
+    for product in products:
+        product["demand_limit"] = _parse_demand_free(clean, product["name"])
+    used = {_canon(r) for p in products for r in p["resource_usage"]}
+    filtered = {k: v for k, v in capacities.items() if _canon(k) in used}
+    final_caps = filtered or capacities
+    if not products or not final_caps:
+        return None
+    return {"products": products, "capacities": final_caps}
+
+
 def _extract_with_fallback(problem: str) -> BusinessModel:
     text = problem.replace("$", "")
     game_match = re.search(r"choose\s+([A-Za-z]+)\s+or\s+([A-Za-z]+)", text, re.I)
-    if game_match and re.search(r"player\s+1|player\s+2|payoff|expected payoff", text, re.I):
+    if game_match and re.search(r"player\s+1|player\s+2|payoff|expected payoff|game|versus|\bvs\b", text, re.I):
         first_action, second_action = game_match.groups()
         listed_payoffs = re.search(
-            r"payoffs?\s+(?:are|of)\s+(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)",
+            r"payoffs?\s+(?:are|of|is)?\s*\[?(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\]?",
             text,
             re.I,
         )
@@ -117,21 +436,44 @@ def _extract_with_fallback(problem: str) -> BusinessModel:
             (second_action, second_action): rf"both\s+{re.escape(second_action)}.*?(-?\d+(?:\.\d+)?)",
         }
         payoffs = {}
+        ok = True
         for (player_one_action, player_two_action), pattern in payoff_patterns.items():
             match = re.search(pattern, text, re.I)
             if not match:
-                raise ValueError("Could not extract every game payoff. Provide one payoff for each action combination.")
+                ok = False
+                break
             payoffs.setdefault(player_one_action, {})[player_two_action] = float(match.group(1))
+        if ok:
+            return BusinessModel.model_validate({
+                "model_type": "game_theory",
+                "model": {"player_one_actions": [first_action, second_action], "player_two_actions": [first_action, second_action], "payoffs": payoffs, "zero_sum": True},
+                "problem_summary": "Choose a mixed strategy for Player 1 against a competing Player 2.",
+                "technique": "Zero-sum game linear programming",
+                "objective": "Maximize Player 1's guaranteed expected payoff",
+                "variables": [f"probability of {first_action}", f"probability of {second_action}"],
+                "constraints": ["strategy probabilities sum to 1", "expected payoff is at least the game value against every opposing action"],
+                "assumptions": ["The game is zero-sum and both players choose actions simultaneously."],
+            })
+    # Free-form transportation attempt (supplies + demands + costs in any wording).
+    transport = _parse_transportation_free(text)
+    if transport is not None:
+        sources, destinations, costs = transport
         return BusinessModel.model_validate({
-            "model_type": "game_theory",
-            "model": {"player_one_actions": [first_action, second_action], "player_two_actions": [first_action, second_action], "payoffs": payoffs, "zero_sum": True},
-            "problem_summary": "Choose a mixed strategy for Player 1 against a competing Player 2.",
-            "technique": "Zero-sum game linear programming",
-            "objective": "Maximize Player 1's guaranteed expected payoff",
-            "variables": [f"probability of {first_action}", f"probability of {second_action}"],
-            "constraints": ["strategy probabilities sum to 1", "expected payoff is at least the game value against every opposing action"],
-            "assumptions": ["The game is zero-sum and both players choose actions simultaneously."],
+            "model_type": "transportation",
+            "model": {
+                "sources": [{"name": name, "supply": qty} for name, qty in sources],
+                "destinations": [{"name": name, "demand": qty} for name, qty in destinations],
+                "costs": costs,
+            },
+            "problem_summary": "Choose shipment quantities to minimize total shipping cost.",
+            "technique": "Transportation linear programming",
+            "objective": "Minimize total shipping cost",
+            "variables": [f"quantity from {s} to {d}" for s, _ in sources for d, _ in destinations],
+            "constraints": [f"shipments from {s} must not exceed supply {q}" for s, q in sources]
+            + [f"deliveries to {d} must meet demand {q}" for d, q in destinations],
+            "assumptions": ["Understood your wording automatically; shipping cost is linear in quantity."],
         })
+    # Legacy strict production path first (keeps old prompts working).
     products = []
     for sentence in text.split("."):
         entry = re.search(r"(Product\s+[A-Za-z0-9]+).*?(\d+(?:\.\d+)?)\s+profit.*?(?:needs|uses|requires|consumes)\s+(.*)", sentence, re.I)
@@ -145,28 +487,144 @@ def _extract_with_fallback(problem: str) -> BusinessModel:
             products.append({"name": name, "profit": float(profit), "resource_usage": usage, "demand_limit": float(demand_match.group(1)) if demand_match else None})
 
     capacities = _parse_resource_values(re.search(r"We have (.*?)(?:Demand|$)", text, re.I).group(1) if re.search(r"We have (.*?)(?:Demand|$)", text, re.I) else "")
+    if not capacities:
+        capacities = _parse_capacities_free(text)
     for product in products:
-        for resource in product["resource_usage"]:
+        for resource in list(product["resource_usage"]):
             matching_capacity = next(
                 (name for name in capacities if name.lower() in resource.lower() or resource.lower() in name.lower()),
                 None,
             )
             if matching_capacity and resource not in capacities:
                 capacities[resource] = capacities.pop(matching_capacity)
-    if re.search(r"warehouse|ship|shipping|transport|freight|supplier|customer|distribution", text, re.I):
-        raise ValueError("Transportation problems require source supplies, destination demands, and shipping costs. Add those details so the AI can build the transportation model.")
-    if not products or not capacities:
-        raise ValueError("Could not extract a complete model. Add product profits, resource usage, and capacities, or configure EXPLABS_API_KEY.")
-    return BusinessModel.model_validate({
-        "model_type": "production",
-        "model": {"products": products, "capacities": capacities},
-        "problem_summary": "Choose production quantities to maximize total profit under resource limits.",
-        "technique": "Linear programming",
-        "objective": "Maximize total profit",
-        "variables": [f"quantity of {product['name']}" for product in products],
-        "constraints": [f"resource usage must not exceed {name} capacity" for name in capacities],
-        "assumptions": ["Production quantities may be fractional unless the prompt requires whole units."],
-    })
+    if products and capacities:
+        return BusinessModel.model_validate({
+            "model_type": "production",
+            "model": {"products": products, "capacities": capacities},
+            "problem_summary": "Choose production quantities to maximize total profit under resource limits.",
+            "technique": "Linear programming",
+            "objective": "Maximize total profit",
+            "variables": [f"quantity of {product['name']}" for product in products],
+            "constraints": [f"resource usage must not exceed {name} capacity" for name in capacities],
+            "assumptions": ["Understood your wording automatically; quantities may be fractional unless whole units are required."],
+        })
+    # Free-form production path: any wording with the same numbers.
+    free = _parse_production_free(text)
+    if free is not None:
+        return BusinessModel.model_validate({
+            "model_type": "production",
+            "model": free,
+            "problem_summary": "Choose production quantities to maximize total profit under resource limits.",
+            "technique": "Linear programming",
+            "objective": "Maximize total profit",
+            "variables": [f"quantity of {product['name']}" for product in free["products"]],
+            "constraints": [f"resource usage must not exceed {name} capacity" for name in free["capacities"]],
+            "assumptions": ["Understood your wording automatically; quantities may be fractional unless whole units are required."],
+        })
+    if re.search(r"solve\s+(for\s+)?x\b|derivative|integral|quadratic|differentiate|integrate|simplify", text, re.I):
+        raise ValueError("OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
+    if re.search(r"warehouse|ship|shipping|transport|freight|supplier|customer|distribution|supply|demand", text, re.I):
+        raise ValueError("I can see a shipping problem, but I need supplies, demands, and every route cost too — e.g. 'Warehouse A supplies 100, Store X needs 120, A to X costs 4'. Add those in any wording and try again.")
+    raise ValueError("I could not build an optimization model from that text. I only solve production, transportation, and game-theory problems — not general math. Try e.g.: 'We make chairs (40 profit, 2 wood + 1 labor) and tables (30 profit, 1 wood + 2 labor). We have 100 wood and 80 labor.' Any wording with the same numbers works.")
+
+
+def _parse_transportation_free(text: str):
+    sources: list[tuple[str, float]] = []
+    destinations: list[tuple[str, float]] = []
+    seen: set[str] = set()
+
+    def push(items: list, name: str, qty: float, kind: str):
+        cleaned = _clean_name(name)
+        if not cleaned:
+            return
+        key = kind + ":" + re.sub(r"\s+", " ", cleaned.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        items.append((cleaned, qty))
+
+    for pattern in [
+        r"([A-Za-z][\w\- ]*?)\s+(?:has\s+supply|suppl\w*(?:ies)?|supply)\s+(?:of\s+)?(\d+(?:\.\d+)?)",
+        r"(?:supply|stock|inventory|capacity|available)\s+(?:at|from|of)\s+([A-Za-z][\w\- ]*?)\s*(?:is|:|=)?\s*(\d+(?:\.\d+)?)",
+    ]:
+        for m in re.finditer(pattern, text, re.I):
+            push(sources, m.group(1), float(m.group(2)), "s")
+    for m in re.finditer(
+        r"(factory|warehouse|plant|supplier|depot|origin)\s+([A-Za-z0-9\- ]*?)\s*(?:has|holds?|stocks?|with|can supply|produces?|makes?|offers?)?\s*(?:supply|stock|inventory|capacity|available|units?)?\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?)?",
+        text, re.I,
+    ):
+        push(sources, f"{m.group(1)} {m.group(2)}".strip(), float(m.group(3)), "s")
+    for pattern in [
+        r"([A-Za-z][\w\- ]*?)\s+(?:needs?\s+demand|requires?\s+demand|has\s+demand|demand)\s+(?:of\s+|is\s+)?(\d+(?:\.\d+)?)",
+        r"(?:demand|need|needs|requirement)\s+(?:at|for|of|from)\s+([A-Za-z][\w\- ]*?)\s*(?:is|:|=)?\s*(\d+(?:\.\d+)?)",
+    ]:
+        for m in re.finditer(pattern, text, re.I):
+            if re.search(r"demand for", m.group(0), re.I) and re.search(r"at most|maximum|max", text, re.I):
+                continue
+            push(destinations, m.group(1), float(m.group(2)), "d")
+    for m in re.finditer(
+        r"(store|shop|city|customer|retailer|destination|market|client)\s+([A-Za-z0-9\- ]*?)\s*(?:needs?|requires?|demands?|wants?|orders?|takes?)?\s*(?:demand|units?|need)?\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?)?",
+        text, re.I,
+    ):
+        push(destinations, f"{m.group(1)} {m.group(2)}".strip(), float(m.group(3)), "d")
+    # generic "X needs 120" (but not profit lines, and not "X needs demand N")
+    for m in re.finditer(r"([A-Za-z][\w\- ]*?)\s+(?:needs?|requires?|demands?|orders?)\s+(\d+(?:\.\d+)?)\s*(?:units?)?(?!\s*(?:profit|margin))", text, re.I):
+        if re.search(r"profit|margin|machine|labo?r|oven|wood|chips", m.group(0), re.I):
+            continue
+        if re.search(r"\b(needs?|requires?|demands?|demand|orders?)\s*$", m.group(1), re.I):
+            continue
+        push(destinations, m.group(1), float(m.group(2)), "d")
+    src_norms = {re.sub(r"\s+", " ", s.lower()) for s, _ in sources}
+    destinations = [(n, q) for n, q in destinations if re.sub(r"\s+", " ", n.lower()) not in src_norms]
+    if not sources or not destinations:
+        return None
+    src_names = [s for s, _ in sources]
+    dst_names = [d for d, _ in destinations]
+
+    def match_name(token: str, known: list[str]) -> str | None:
+        t = re.sub(r"\s+", " ", token.strip().lower())
+        for k in known:
+            if re.sub(r"\s+", " ", k.strip().lower()) == t:
+                return k
+        for k in known:
+            if re.sub(r"\s+", " ", k.strip().lower()).endswith(" " + t):
+                return k
+        singles = [k for k in known if (re.sub(r"\s+", " ", k.strip().lower()).split(" ") or [""])[-1] == t]
+        if len(singles) == 1:
+            return singles[0]
+        contains = [k for k in known if t in re.sub(r"\s+", " ", k.strip().lower()) or re.sub(r"\s+", " ", k.strip().lower()) in t]
+        if len(contains) == 1:
+            return contains[0]
+        # fuzzy: strip leading words ("shipping from A" -> "A") and retry each suffix
+        words = [w for w in t.split(" ") if w and not re.match(r"^(shipping|shipment|freight|transport|transportation|delivery|deliver|costs?|costing|from|the|unit|units|per)$", w)]
+        for i in range(len(words)):
+            suffix = " ".join(words[i:])
+            for k in known:
+                if re.sub(r"\s+", " ", k.strip().lower()) == suffix:
+                    return k
+            for k in known:
+                if re.sub(r"\s+", " ", k.strip().lower()).endswith(" " + suffix):
+                    return k
+            short = [k for k in known if (re.sub(r"\s+", " ", k.strip().lower()).split(" ") or [""])[-1] == suffix]
+            if len(short) == 1:
+                return short[0]
+        return None
+
+    costs: dict[str, dict[str, float]] = {}
+    for pattern in [
+        r"([A-Za-z][\w\- ]*?)\s*(?:->|→|—|–|-)\s*([A-Za-z][\w\- ]*?)\s*(?:costs?|costing|price|rate|freight|charge)?\s*(?:is|:|=)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\s*per unit)?",
+        r"([A-Za-z][\w\- ]*?)\s+to\s+([A-Za-z][\w\- ]*?)\s*(?:costs?|costing|price|rate|freight|charge|fare)?\s*(?:is|:|=|of)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\s*per unit)?",
+    ]:
+        for m in re.finditer(pattern, text, re.I):
+            s = match_name(m.group(1), src_names)
+            d = match_name(m.group(2), dst_names)
+            if s and d:
+                costs.setdefault(s, {}).setdefault(d, float(m.group(3)))
+    needed = len(sources) * len(destinations)
+    have = sum(len(row) for row in costs.values())
+    if have < needed:
+        return None
+    return sources, destinations, costs
 
 
 def _parse_resource_values(text: str) -> dict[str, float]:
@@ -178,5 +636,5 @@ def _parse_resource_values(text: str) -> dict[str, float]:
     ):
         resource = (resource_after_unit or resource_before_unit).strip()
         resource = re.sub(r"^(?:hours?|kg|units?)\s+", "", resource, flags=re.I)
-        values[resource] = float(value)
+        values[_clean_name(resource)] = float(value)
     return values

@@ -1,6 +1,8 @@
-/* Offline engine: parse plain-English planning problems (no API key) and solve
-   them in-browser with the bundled simplex LP solver. Mirrors backend/app/ai.py
-   fallback parsing plus a structured transportation parser. */
+/* Offline engine: understand free-form plain-English optimization problems
+   (no API key) and solve them in-browser with the bundled simplex LP solver.
+   Accepts any wording — product names, synonyms for profit/resources/capacity —
+   then normalizes ("understands") it into a production / transportation /
+   game-theory model. Mirrors backend/app/ai.py fallback parsing. */
 
 import { solveLP } from './simplex';
 
@@ -38,9 +40,42 @@ function fmtG(v: number): string {
   return s.replace('e+0', 'e+').replace('e-0', 'e-');
 }
 
-/* ---------------- production parsing (port of backend fallback) ------------- */
+/* ---------------- shared helpers ------------------------------------------ */
+
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'each', 'every', 'per', 'of', 'for', 'with', 'and', 'or',
+  'to', 'from', 'in', 'on', 'is', 'are', 'it', 'its', 'we', 'our', 'you',
+  'that', 'this', 'which', 'using', 'uses', 'use', 'needs', 'need', 'requires',
+  'require', 'consumes', 'consume', 'takes', 'take', 'profit', 'profits',
+  'margin', 'earn', 'earns', 'gives', 'give', 'yields', 'makes', 'make',
+  'units', 'unit', 'hours', 'hour', 'hrs', 'hr', 'kg', 'kgs', 'tons', 'ton',
+]);
+
+function cleanName(raw: string): string {
+  let s = raw.trim().replace(/\s+/g, ' ');
+  s = s.replace(/^(the|a|an|each|every|our|your|my)\s+/i, '').trim();
+  if (!s) return s;
+  // Title-case short names, keep longer names as written
+  return s;
+}
+
+function canonKey(s: string): string {
+  const norm = s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const stripped = norm
+    .replace(/\b(units?|hours?|hrs?|hr|kg|kgs|tons?|tonnes?|days?|minutes?|mins?)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped || norm;
+}
+
+function escRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/* ---------------- production parsing (free-form) ---------------------------- */
 
 function parseResourceValues(text: string): Record<string, number> {
+  // Legacy strict pattern: requires explicit units (kept for compatibility).
   const values: Record<string, number> = {};
   const re =
     /(\d+(?:\.\d+)?)\s*(?:(hours?|kg|units?)\s+(?:on|of)?\s*([A-Za-z][\w ]*?)|([A-Za-z][\w ]*?)\s+(hours?|kg|units?))(?=\s+and|,|\.|$)/gi;
@@ -51,16 +86,222 @@ function parseResourceValues(text: string): Record<string, number> {
     let resource = (m[4] || m[3] || '').trim();
     if (!unitFirst) resource = resource.replace(/^(?:hours?|kg|units?)\s+/i, '');
     resource = resource.trim();
-    if (resource) values[resource] = parseFloat(value);
+    if (resource) values[cleanName(resource)] = parseFloat(value);
   }
   return values;
 }
 
+/** Free-form "2 wood", "2 hours of machine time", "2 machine hours" etc. */
+function parseUsageFreeForm(segment: string, excludeValue: number | null): Record<string, number> {
+  const usage: Record<string, number> = {};
+  // (?<![A-Za-z0-9_.]) so digits inside words like X1 are never read as quantities
+  const re =
+    /(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|kg|kgs|tons?|tonnes?|units?|days?|minutes?|mins?)?\s*(?:of\s+)?([A-Za-z][A-Za-z][\w\- ]*?)(?=\s*(?:and|,|;|\.|$|\+|needs?|uses?|requires?|consumes?|takes?|takes|per))/gi;
+  let m: RegExpExecArray | null;
+  let skippedProfit = false;
+  while ((m = re.exec(segment)) !== null) {
+    const value = parseFloat(m[1]);
+    let resource = (m[3] || '').trim().replace(/\s+per\s+unit.*$/i, '').trim();
+    // strip leading unit words accidentally captured
+    resource = resource.replace(/^(units?|hours?|hrs?|kg)\s+/i, '').trim();
+    const low = resource.toLowerCase();
+    if (!resource || resource.length > 40) continue;
+    if (/^(per|each|every)\b/i.test(resource)) continue;
+    if (low.includes('profit') || low.includes('margin') || low.includes('earn') || low.includes('revenue')) continue;
+    if (STOP_WORDS.has(low)) continue;
+    // Skip the profit number itself once (e.g. "40 profit and needs 2 machine...")
+    if (excludeValue != null && !skippedProfit && Math.abs(value - excludeValue) < 1e-9) {
+      skippedProfit = true;
+      continue;
+    }
+    const name = cleanName(resource);
+    if (name) usage[name] = value;
+  }
+  return usage;
+}
+
+function productNameFromSentence(sentence: string, fallback: string): string {
+  let m: RegExpExecArray | null;
+  // "Product A" / "Product Bread"
+  m = /(product\s+[A-Za-z0-9\-]+)/i.exec(sentence);
+  if (m) return cleanName(m[1]);
+  // "Profit per X1 is 40" — exact single-token name (avoids lazy-match traps like "X")
+  m = /(?:profit|margin|earning|contribution|gain)\s+(?:per|for|of|on)\s+(?:of\s+)?([A-Za-z][A-Za-z0-9\-]*)/i.exec(sentence);
+  if (m && !STOP_WORDS.has(m[1].trim().toLowerCase())) return cleanName(m[1]);
+  // "Mango Smoothie for a profit of 50" — up to 3 words before "for a profit"
+  m = /([A-Za-z][A-Za-z0-9\-]*(?:\s+[A-Za-z][A-Za-z0-9\-]*){0,2})\s+for\s+a\s+(?:profit|margin)\s+of\s+\$?\d/i.exec(sentence);
+  if (m) {
+    const cand = cleanName(m[1].replace(/^(sells?|makes?|produces?|offers?|manufactures?|provides?)\s+/i, ''));
+    const last = (cand.toLowerCase().split(' ').pop() || '');
+    if (cand && cand.length <= 30 && !STOP_WORDS.has(last)) return cand;
+  }
+  // "Chairs give 40", "Bread earns 25", "Phone yields 120"
+  m = /([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s+(?:gives?|earns?|yields?|makes?|brings?|fetches?|nets?)\s+(?:a\s+)?(?:profit\s+(?:of\s+)?)?\$?\d/i.exec(sentence);
+  if (m && !STOP_WORDS.has(m[1].trim().toLowerCase())) return cleanName(m[1]);
+  // "profit for chairs is 40", "profit of tables: 30" (separator required so names like X1 stay intact)
+  m = /(?:profit|margin|earning|contribution|gain)(?:\s*(?:per|for|of|on))?\s+(?:of\s+)?([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s+(?:is|=|:|of)\s*\$?\d/i.exec(sentence);
+  if (m && !STOP_WORDS.has(m[1].trim().toLowerCase())) {
+    const cand = cleanName(m[1].replace(/\s+(is|are|of|at)$/i, ''));
+    if (cand && cand.length <= 30) return cand;
+  }
+  // "Chairs: profit 40" / "Chairs - 40 profit"
+  m = /([A-Za-z][A-Za-z0-9\- ]{0,28}?)\s*[:\-–]\s*\$?\d+(?:\.\d+)?\s*(?:profit|margin)/i.exec(sentence);
+  if (m) return cleanName(m[1]);
+  // "bread margin 25" / "chairs profit 40" — name before the keyword
+  m = /([A-Za-z][A-Za-z0-9\-]*)\s+(?:profit|margin|earning|contribution)s?\s*(?:is|=|:|of)?\s*\$?\d+(?:\.\d+)?/i.exec(sentence);
+  if (m && !STOP_WORDS.has(m[1].trim().toLowerCase())) return cleanName(m[1]);
+  // "Each chair ..." / "One table ..."
+  m = /(?:each|every|one|per)\s+([A-Za-z][A-Za-z0-9\-]*)/i.exec(sentence);
+  if (m) {
+    const w = m[1].trim();
+    if (!STOP_WORDS.has(w.toLowerCase())) return cleanName(w.replace(/s$/, (s) => (s.length > 4 ? '' : s)) || w);
+  }
+  return fallback;
+}
+
+function profitFromSentence(sentence: string): number | null {
+  let m: RegExpExecArray | null;
+  // "Profit per X1 is 40", "margin for chairs: 30" (separator required so X1 isn't read as X + 1)
+  m = /(?:profit|margin|earning|contribution|gain)\s+(?:per|for|of|on)\s+[A-Za-z0-9\- ]+?\s+(?:is|=|:)\s*\$?\s*(\d+(?:\.\d+)?)/i.exec(sentence);
+  if (m) return parseFloat(m[1]);
+  // number adjacent to profit synonyms: "40 profit", "profit of 40", "profit is $40", "earns 30"
+  m = /(\d+(?:\.\d+)?)\s*(?:profit|margin|earned|earnings|contribution)/i.exec(sentence);
+  if (m) return parseFloat(m[1]);
+  m = /(?:profit|margin|earning|contribution|gain|revenue|nets?|earns?|yields?|makes?|gives?|price|value)(?:\s*(?:per|for|of|on|is|:|=))?\s*\$?\s*(\d+(?:\.\d+)?)/i.exec(sentence);
+  if (m) return parseFloat(m[1]);
+  return null;
+}
+
+function parseCapacitiesFree(text: string): Record<string, number> {
+  const caps: Record<string, number> = {};
+  const sentences = text.replace(/\$/g, '').split(/[.\n;]+/);
+  const capHint = /have|available|in stock|on hand|capacity|capacities|at most|up to|limited|limit|maximum|total|only|supply\b/i;
+  for (const raw of sentences) {
+    const s = raw.trim();
+    if (!s) continue;
+    // Skip product-definition sentences unless they also state availability
+    const isProductLine = /profit|margin|earn|contribution/i.test(s);
+    if (isProductLine && !capHint.test(s)) continue;
+    if (!capHint.test(s) && !/:/.test(s) && !/<=?/.test(s)) continue;
+    // "Machine <= 100", "Machine: 100", "Machine capacity 100", "capacity of Machine is 100"
+    let m: RegExpExecArray | null;
+    const capWordRe = /([A-Za-z][A-Za-z ]{1,30}?)\s+(?:capacity|available|in stock|on hand)\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?|hours?|hrs?|kg|tons?)?/gi;
+    while ((m = capWordRe.exec(s)) !== null) {
+      const name = cleanName(m[1].replace(/^(we|they|factory|we have|available|total|capacity of|capacity)\s+/i, ''));
+      if (!name || STOP_WORDS.has(name.toLowerCase()) || /profit|margin|demand|supply/i.test(name)) continue;
+      if (name.length > 40) continue;
+      if (!(name in caps)) caps[name] = parseFloat(m[2]);
+    }
+    const leRe = /([A-Za-z][A-Za-z ]{1,30}?)\s*(?:capacity|available|in stock|on hand)?\s*(?:<=|<|:|=|is|of)\s*(\d+(?:\.\d+)?)\s*(?:units?|hours?|hrs?|kg|tons?)?/gi;
+    while ((m = leRe.exec(s)) !== null) {
+      const name = cleanName(m[1].replace(/^(we|they|factory|we have|available|total|capacity of|capacity)\s+/i, ''));
+      if (!name || STOP_WORDS.has(name.toLowerCase()) || /profit|margin|demand|supply/i.test(name)) continue;
+      if (name.length > 40) continue;
+      caps[name] = parseFloat(m[2]);
+    }
+    // "100 units Machine", "100 hours of labor", "100 wood"
+    const qtyRe = /(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*(units?|hours?|hrs?|hr|kg|kgs|tons?|tonnes?|days?)?\s*(?:of\s+)?([A-Za-z][A-Za-z][\w\- ]*?)(?=\s*(?:and|,|;|$|available|in stock|capacity|at most|maximum|total))/gi;
+    while ((m = qtyRe.exec(s)) !== null) {
+      const low3 = (m[3] || '').toLowerCase();
+      if (/profit|margin|demand|supply|product/i.test(low3)) continue;
+      const name = cleanName(m[3]);
+      if (!name || STOP_WORDS.has(name.toLowerCase()) || name.length > 40) continue;
+      if (!(name in caps)) caps[name] = parseFloat(m[1]);
+    }
+    // legacy strict units pattern as extra source
+    for (const [k, v] of Object.entries(parseResourceValues(s))) {
+      if (!(k in caps) && !/profit|demand|supply/i.test(k)) caps[k] = v;
+    }
+  }
+  // "We have 100 units Machine and 80 units Labor" legacy anchor
+  const capMatch = /we have (.*?)(?:demand|$)/i.exec(text.replace(/\$/g, ''));
+  if (capMatch) {
+    for (const [k, v] of Object.entries(parseResourceValues(capMatch[1]))) {
+      if (!(k in caps)) caps[k] = v;
+    }
+  }
+  return caps;
+}
+
+function parseDemandFree(text: string, productLabel: string): number | null {
+  const label = productLabel.replace(/^product\s+/i, '').trim();
+  const lastWord = (label.split(/\s+/).pop() || label).trim();
+  const base = [productLabel, label, lastWord].filter(Boolean);
+  // plural/singular tolerant variants: "cake" also matches "cakes"
+  const cands: string[] = [];
+  for (const b of base) {
+    cands.push(b);
+    if (/s$/i.test(b) && b.length > 3) cands.push(b.slice(0, -1));
+    else cands.push(b + 's');
+  }
+  for (const cand of cands) {
+    const e = escRe(cand);
+    let m =
+      new RegExp(`demand(?:\\s+for)?\\s+${e}\\s*(?:is\\s+)?(?:at most|max(?:imum)?|cannot exceed|up to|of|is|:|=|<=?)\\s*(\\d+(?:\\.\\d+)?)`, 'i').exec(text) ||
+      new RegExp(`${e}\\s*(?:demand)?\\s*(?:at most|max(?:imum)?|cannot exceed|up to|limit(?:ed to)?|<=|<)\\s*(\\d+(?:\\.\\d+)?)`, 'i').exec(text) ||
+      new RegExp(`(?:at most|max(?:imum)?|up to|no more than)\\s*(\\d+(?:\\.\\d+)?)\\s*(?:units?\\s+)?(?:of\\s+)?${e}`, 'i').exec(text);
+    if (m) return parseFloat(m[1]);
+  }
+  return null;
+}
+
 export interface ParsedProduct { name: string; profit: number; resource_usage: Record<string, number>; demand_limit: number | null }
 
-function parseProduction(text: string): { products: ParsedProduct[]; capacities: Record<string, number> } | null {
+/** Split "Profit per X1 is 40, profit per X2 is 30" into per-product clauses. */
+function splitProductClauses(sentence: string): string[] {
+  const parts = sentence.split(/,(?=\s*(?:and\s+)?(?:profit|margin|each|every|product\b))|\s+and\s+(?=[A-Za-z][A-Za-z0-9\- ]{0,30}?\s+for\s+a\s+(?:profit|margin))/i);
+  if (parts.length <= 1) return [sentence];
+  // only split if more than one part mentions a profit number
+  const withProfit = parts.filter((p) => profitFromSentence(p) != null);
+  if (withProfit.length > 1) return parts.map((p) => p.trim()).filter(Boolean);
+  return [sentence];
+}
+
+/** Canonical-name match with safe substring fallback (used by attach + reconcile). */
+function canonHit(a: string, b: string): boolean {
+  const ka = canonKey(a);
+  const kb = canonKey(b);
+  if (!ka || !kb) return ka === kb && ka !== '';
+  if (ka === kb) return true;
+  // substring matching only for meaningful fragments (avoids "" or 1-char false hits)
+  if (kb.length >= 3 && ka.includes(kb)) return true;
+  if (ka.length >= 3 && kb.includes(ka)) return true;
+  return false;
+}
+
+/**
+ * Attach "X1 requires 2 machine hours..." lines (usage without profit) to
+ * products discovered from profit-only clauses, matched by product name.
+ */
+function attachSplitNeeds(clean: string, products: ParsedProduct[]): void {
+  const needy = products.filter((p) => Object.keys(p.resource_usage).length === 0);
+  if (needy.length === 0) return;
+  for (const raw of clean.split(/[.\n;]+/)) {
+    const sentence = raw.trim();
+    if (!sentence || /profit|margin|earn|contribution|gain|revenue/i.test(sentence)) continue;
+    const needMatch = /^\s*(?:for\s+)?([A-Za-z][A-Za-z0-9\-]*)\s+(?:needs?|uses?|requires?|consumes?|takes?|takes up|spends?)\s+(.*)/i.exec(sentence);
+    if (!needMatch) continue;
+    const [, nameRaw, usageText] = needMatch;
+    const usage = parseUsageFreeForm(usageText, null);
+    if (Object.keys(usage).length === 0) continue;
+    const target = needy.find((p) => canonHit(p.name, cleanName(nameRaw)));
+    if (target) {
+      target.resource_usage = usage;
+    } else if (needy.some((p) => Object.keys(p.resource_usage).length === 0)) {
+      // positional fallback: first still-empty product takes it
+      const first = needy.find((p) => Object.keys(p.resource_usage).length === 0);
+      if (first && !Object.keys(first.resource_usage).length) {
+        // only use positionally when the names look generic/placeholder-like
+        if (/^product\s+[a-z]$/i.test(first.name)) first.resource_usage = usage;
+      }
+    }
+  }
+}
+
+export function parseProduction(text: string): { products: ParsedProduct[]; capacities: Record<string, number> } | null {
   const clean = text.replace(/\$/g, '');
-  const products: ParsedProduct[] = [];
+  // Fast path: legacy strict format (keeps old behavior/tests exact).
+  const strictProducts: ParsedProduct[] = [];
   for (const sentence of clean.split('.')) {
     const entry =
       /(Product\s+[A-Za-z0-9]+).*?(\d+(?:\.\d+)?)\s+profit.*?(?:needs|uses|requires|consumes)\s+(.*)/i.exec(sentence);
@@ -73,7 +314,7 @@ function parseProduction(text: string): { products: ParsedProduct[]; capacities:
       'i',
     ).exec(clean);
     if (Object.keys(usage).length > 0) {
-      products.push({
+      strictProducts.push({
         name: name.trim(),
         profit: parseFloat(profit),
         resource_usage: usage,
@@ -81,23 +322,110 @@ function parseProduction(text: string): { products: ParsedProduct[]; capacities:
       });
     }
   }
-  const capMatch = /We have (.*?)(?:Demand|$)/i.exec(clean);
-  const capacities: Record<string, number> = capMatch ? parseResourceValues(capMatch[1]) : {};
+  if (strictProducts.length > 0) {
+    const capMatch = /We have (.*?)(?:Demand|$)/i.exec(clean);
+    const capacities: Record<string, number> = capMatch ? parseResourceValues(capMatch[1]) : {};
+    const freeCaps = parseCapacitiesFree(clean);
+    for (const [k, v] of Object.entries(freeCaps)) {
+      if (!(k in capacities)) capacities[k] = v;
+    }
+    for (const product of strictProducts) {
+      for (const resource of Object.keys(product.resource_usage)) {
+        if (!(resource in capacities)) {
+          const match = Object.keys(capacities).find(
+            (c) => canonKey(c) === canonKey(resource) || c.toLowerCase().includes(resource.toLowerCase()) || resource.toLowerCase().includes(c.toLowerCase()),
+          );
+          if (match) {
+            capacities[resource] = capacities[match];
+            delete capacities[match];
+          }
+        }
+      }
+    }
+    if (Object.keys(capacities).length > 0) return { products: strictProducts, capacities };
+  }
+
+  // Free-form path: any wording with profits + resource needs + availability.
+  // Handles both "Chairs earn 40 and need 2 wood..." (same sentence) and
+  // "Profit per X1 is 40. X1 requires 2 machine hours..." (split sentences).
+  const sentences = clean.split(/[.\n;]+/);
+  const products: ParsedProduct[] = [];
+  let autoIdx = 0;
+  for (const raw of sentences) {
+    const sentence = raw.trim();
+    if (!sentence) continue;
+    // Split multi-product sentences: "Profit per X1 is 40, profit per X2 is 30"
+    const clauses = splitProductClauses(sentence);
+    for (const clause of clauses) {
+      if (!/profit|margin|earn|contribution|gain|revenue/i.test(clause)) continue;
+      // Skip capacity-only lines ("We have 100 wood...")
+      if (/^(we have|available|in stock|capacity|total)/i.test(clause) && !/needs?|uses?|requires?|consumes?|takes?|needs/i.test(clause) && /have|available|capacity|total/i.test(clause)) {
+        // still may define a product inline; check profit adjacency
+        if (!/(gives?|earns?|yields?|makes?)/i.test(clause)) continue;
+      }
+      const profit = profitFromSentence(clause);
+      if (profit == null || !(profit >= 0)) continue;
+      autoIdx += 1;
+      const name = productNameFromSentence(clause, `Product ${String.fromCharCode(64 + autoIdx)}`);
+      // usage = needs/uses/... clause if present, else whole clause
+      const needMatch = /(?:needs?|uses?|requires?|consumes?|takes?|takes up|spends?)\s+(.*)/i.exec(clause);
+      const usageText = needMatch ? needMatch[1] : clause;
+      const usage = parseUsageFreeForm(usageText, profit);
+      if (Object.keys(usage).length === 0) {
+        // profit-only clause (usage lives in another sentence) — remember it for phase 2
+        if (!products.some((p) => canonKey(p.name) === canonKey(name))) {
+          products.push({ name, profit, resource_usage: {}, demand_limit: null });
+        }
+        continue;
+      }
+      // avoid duplicates of the same product name
+      if (products.some((p) => canonKey(p.name) === canonKey(name))) continue;
+      products.push({ name, profit, resource_usage: usage, demand_limit: null });
+    }
+  }
+  // Phase 2: attach "X1 requires 2 machine hours..." lines to profit-only products.
+  attachSplitNeeds(clean, products);
+  // Drop profit-only entries that never found usage (incomplete info, not a product).
+  for (let i = products.length - 1; i >= 0; i--) {
+    if (Object.keys(products[i].resource_usage).length === 0) products.splice(i, 1);
+  }
+  if (products.length === 0) return null;
+  const capacities = parseCapacitiesFree(clean);
+  // reconcile usage names with capacity names (e.g. "machines" vs "Machine")
+  const capKeys = Object.keys(capacities);
   for (const product of products) {
-    for (const resource of Object.keys(product.resource_usage)) {
-      if (!(resource in capacities)) {
-        const match = Object.keys(capacities).find(
-          (c) => c.toLowerCase().includes(resource.toLowerCase()) || resource.toLowerCase().includes(c.toLowerCase()),
-        );
-        if (match) {
-          capacities[resource] = capacities[match];
-          delete capacities[match];
+    for (const res of Object.keys(product.resource_usage)) {
+      if (res in capacities) continue;
+      const hit = capKeys.find((c) => canonHit(c, res));
+      if (hit) {
+        product.resource_usage[hit] = product.resource_usage[res];
+        delete product.resource_usage[res];
+      }
+    }
+  }
+  // drop usage resources with no known capacity only if we still have coverage
+  const known = new Set(Object.keys(capacities).map(canonKey));
+  for (const product of products) {
+    for (const res of Object.keys(product.resource_usage)) {
+      if (!known.has(canonKey(res))) {
+        const hit = Object.keys(capacities).find((c) => canonHit(c, res));
+        if (hit && hit !== res) {
+          product.resource_usage[hit] = (product.resource_usage[hit] ?? 0) + product.resource_usage[res];
+          delete product.resource_usage[res];
         }
       }
     }
   }
-  if (products.length === 0 || Object.keys(capacities).length === 0) return null;
-  return { products, capacities };
+  for (const p of products) p.demand_limit = parseDemandFree(clean, p.name);
+  const usedResources = new Set<string>();
+  for (const p of products) for (const r of Object.keys(p.resource_usage)) usedResources.add(canonKey(r));
+  const filteredCaps: Record<string, number> = {};
+  for (const [k, v] of Object.entries(capacities)) {
+    if (usedResources.has(canonKey(k))) filteredCaps[k] = v;
+  }
+  const finalCaps = Object.keys(filteredCaps).length > 0 ? filteredCaps : capacities;
+  if (products.length === 0 || Object.keys(finalCaps).length === 0) return null;
+  return { products, capacities: finalCaps };
 }
 
 export function solveProduction(products: ParsedProduct[], capacities: Record<string, number>): Analysis {
@@ -132,10 +460,11 @@ export function solveProduction(products: ParsedProduct[], capacities: Record<st
   });
   const totalProfit = round2(lp.objective);
   const limited = resourceResults.filter((r) => r.utilization >= 0.999).map((r) => r.name);
+  const understood = products.map((p) => `${p.name} (profit ${p.profit})`).join(', ');
   const explanation =
     limited.length > 0
-      ? `The plan produces the highest possible profit of $${totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}. The limiting resource is ${limited.join(', ')}.`
-      : `The plan produces the highest possible profit of $${totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })} within the stated limits.`;
+      ? `Understood as: make ${understood} with limited ${resources.join(', ')}. The plan produces the highest possible profit of $${totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}. The limiting resource is ${limited.join(', ')}.`
+      : `Understood as: make ${understood} with limited ${resources.join(', ')}. The plan produces the highest possible profit of $${totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })} within the stated limits.`;
   return {
     model_type: 'production',
     problem_summary: 'Choose production quantities to maximize total profit under resource limits.',
@@ -143,7 +472,7 @@ export function solveProduction(products: ParsedProduct[], capacities: Record<st
     objective: 'Maximize total profit',
     variables: products.map((p) => `quantity of ${p.name}`),
     constraints: resources.map((r) => `resource usage must not exceed ${r} capacity`),
-    assumptions: ['Production quantities may be fractional unless the prompt requires whole units.'],
+    assumptions: ['Understood your wording automatically; production quantities may be fractional unless you require whole units.'],
     products: productResults,
     resources: resourceResults,
     shipments: [],
@@ -165,43 +494,129 @@ function norm(s: string): string {
   return s.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function cleanNodeName(raw: string): string {
+  let s = raw.trim().replace(/\s+/g, ' ');
+  s = s.replace(/^(the|each|every|our|from|to|at|in|of)\s+/i, '').trim();
+  // strip trailing verbs/adjectives captured by lazy regexes ("Factory A can" -> "Factory A")
+  s = s.replace(/\s+(can|has|have|with|holds?|stocks?|suppl\w*|supply|produces?|makes?|offers?|provides?|needs?|requires?|demands?|demand|orders?|wants?)$/i, '').trim();
+  s = s.replace(/\s+(factory|warehouse|plant|supplier|depot|store|shop|city|region|destination|source)s?$/i, (m) => m);
+  return s;
+}
+
 export function parseTransportation(text: string): TransportData | null {
   const sources: { name: string; supply: number }[] = [];
   const destinations: { name: string; demand: number }[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (arr: { name: string; supply: number }[] | { name: string; demand: number }[], name: string, qty: string, kind: 's' | 'd') => {
+    const cleaned = cleanNodeName(name);
+    if (!cleaned) return;
+    const key = kind + ':' + norm(cleaned);
+    if (seen.has(key)) return;
+    seen.add(key);
+    (arr as { name: string; supply: number }[]).push({ name: cleaned, supply: parseFloat(qty) } as never);
+  };
   let m: RegExpExecArray | null;
-  const supRe = /([A-Za-z][\w\- ]*?)\s+(?:has\s+supply|supplies|supply)\s+(?:of\s+)?(\d+(?:\.\d+)?)/gi;
-  while ((m = supRe.exec(text)) !== null) sources.push({ name: m[1].trim(), supply: parseFloat(m[2]) });
-  const demRe = /([A-Za-z][\w\- ]*?)\s+(?:needs?\s+demand|requires?\s+demand|has\s+demand|demand)\s+(?:of\s+|is\s+)?(\d+(?:\.\d+)?)/gi;
-  while ((m = demRe.exec(text)) !== null) {
-    // guard: skip the production-style "Demand for X at most N" (no adjacent number after 'demand')
-    destinations.push({ name: m[1].trim(), demand: parseFloat(m[2]) });
+  // 1) explicit supply phrasing
+  const supPatterns = [
+    /([A-Za-z][\w\- ]*?)\s+(?:has\s+supply|suppl\w*(?:ies)?|supply)\s+(?:of\s+)?(\d+(?:\.\d+)?)/gi,
+    /(?:supply|stock|inventory|capacity|available)\s+(?:at|from|of)\s+([A-Za-z][\w\- ]*?)\s*(?:is|:|=)?\s*(\d+(?:\.\d+)?)/gi,
+    /(factory|warehouse|plant|supplier|depot|origin)\s+([A-Za-z0-9\- ]*?)\s*(?:has|holds?|stocks?|with|can supply|produces?|makes?|offers?)?\s*(?:supply|stock|inventory|capacity|available|units?)?\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?)?/gi,
+  ];
+  for (const re of supPatterns) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m.length === 4) {
+        const place = `${m[1]} ${m[2]}`.trim();
+        pushUnique(sources, place, m[3], 's');
+      } else {
+        pushUnique(sources, m[1], m[2], 's');
+      }
+    }
+  }
+  // 2) explicit demand phrasing (free-form: "Store X needs 120", "demand at Y is 130")
+  const demPatterns = [
+    /([A-Za-z][\w\- ]*?)\s+(?:needs?\s+demand|requires?\s+demand|has\s+demand|demand)\s+(?:of\s+|is\s+)?(\d+(?:\.\d+)?)/gi,
+    /(?:demand|need|needs|requirement)\s+(?:at|for|of|from)\s+([A-Za-z][\w\- ]*?)\s*(?:is|:|=)?\s*(\d+(?:\.\d+)?)/gi,
+    /(store|shop|city|customer|retailer|destination|market|client)\s+([A-Za-z0-9\- ]*?)\s*(?:needs?|requires?|demands?|wants?|orders?|takes?)?\s*(?:demand|units?|need)?\s*(?:of\s*|is\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:units?)?/gi,
+    /([A-Za-z][\w\- ]*?)\s+(?:needs?|requires?|demands?|orders?)\s+(\d+(?:\.\d+)?)\s*(?:units?)?(?!\s*(?:profit|margin))/gi,
+  ];
+  for (const re of demPatterns) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m.length === 4) {
+        const place = `${m[1]} ${m[2]}`.trim();
+        // guard: skip production-style "Demand for X at most N" (no adjacent number after 'demand')
+        if (/at most|maximum|^demand for/i.test(m[0]) && !/\d+\s*$/.test(m[0].trim())) continue;
+        pushUnique(destinations, place, m[3], 'd');
+      } else {
+        if (/demand for/i.test(m[0]) && /at most|maximum|max/i.test(text)) continue;
+        // guard: generic "X needs N" must not fire on "X needs demand N" (verb is 'demand')
+        if (/\b(needs?|requires?|demands?|demand|orders?)\s*$/i.test(m[1])) continue;
+        if (/\b(demand|supply)\b/i.test(m[1]) && /needs?\s+demand|demand\s+\d/i.test(m[0])) continue;
+        pushUnique(destinations, m[1], m[2], 'd');
+      }
+    }
+  }
+  // Drop destination hits that are actually sources and vice versa (same normalized name)
+  const srcNorms = new Set(sources.map((s) => norm(s.name)));
+  const dstNorms = new Set(destinations.map((d) => norm(d.name)));
+  void dstNorms;
+  for (let i = destinations.length - 1; i >= 0; i--) {
+    if (srcNorms.has(norm(destinations[i].name))) destinations.splice(i, 1);
   }
   if (sources.length === 0 || destinations.length === 0) return null;
+  // 3) costs: "A to X costs 4", "A -> X = 4", "shipping from A to X is $4 per unit", "A-X: 4"
   const costs: Record<string, Record<string, number>> = {};
-  const costRe = /([A-Za-z][\w\- ]*?)\s+to\s+([A-Za-z][\w\- ]*?)\s+costs?\s+(\d+(?:\.\d+)?)/gi;
+  const srcNames = sources.map((s) => s.name);
+  const dstNames = destinations.map((d) => d.name);
   const matchName = (token: string, known: string[]): string | null => {
     const t = norm(token);
     const exact = known.find((k) => norm(k) === t);
     if (exact) return exact;
-    const tail = known.filter((k) => norm(k).endsWith(' ' + t) || norm(k) === t);
-    if (tail.length === 1) return tail[0];
-    const single = known.find((k) => (norm(k).split(' ').pop() ?? '') === t);
-    return single ?? null;
+    const withPrefix = known.find((k) => norm(k).endsWith(' ' + t));
+    if (withPrefix) return withPrefix;
+    const singles = known.filter((k) => (norm(k).split(' ').pop() ?? '') === t);
+    if (singles.length === 1) return singles[0];
+    const contains = known.filter((k) => norm(k).includes(t) || t.includes(norm(k)));
+    if (contains.length === 1) return contains[0];
+    // fuzzy: strip leading words ("shipping from A" -> "A") and retry each suffix
+    const words = t.split(' ').filter((w) => w && !/^(shipping|shipment|freight|transport|transportation|delivery|deliver|costs?|costing|from|the|unit|units|per)$/.test(w));
+    for (let i = 0; i < words.length; i++) {
+      const suffix = words.slice(i).join(' ');
+      const e2 = known.find((k) => norm(k) === suffix);
+      if (e2) return e2;
+      const w2 = known.find((k) => norm(k).endsWith(' ' + suffix));
+      if (w2) return w2;
+      const s2 = known.filter((k) => (norm(k).split(' ').pop() ?? '') === suffix);
+      if (s2.length === 1) return s2[0];
+    }
+    return null;
   };
-  const srcNames = sources.map((s) => s.name);
-  const dstNames = destinations.map((d) => d.name);
-  while ((m = costRe.exec(text)) !== null) {
-    const s = matchName(m[1], srcNames);
-    const d = matchName(m[2], dstNames);
-    if (s && d) {
-      costs[s] = costs[s] ?? {};
-      costs[s][d] = parseFloat(m[3]);
+  const costPatterns = [
+    /([A-Za-z][\w\- ]*?)\s*(?:->|→|—|–|-)\s*([A-Za-z][\w\- ]*?)\s*(?:costs?|costing|price|rate|freight|charge)?\s*(?:is|:|=)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\s*per unit)?/gi,
+    /([A-Za-z][\w\- ]*?)\s+to\s+([A-Za-z][\w\- ]*?)\s*(?:costs?|costing|price|rate|freight|charge|fare)?\s*(?:is|:|=|of)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\s*per unit)?/gi,
+  ];
+  for (const re of costPatterns) {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      const s = matchName(m[1], srcNames);
+      const d = matchName(m[2], dstNames);
+      if (s && d) {
+        costs[s] = costs[s] ?? {};
+        if (!(d in costs[s])) costs[s][d] = parseFloat(m[3]);
+      }
     }
   }
   const needed = sources.length * destinations.length;
   const have = Object.values(costs).reduce((acc, row) => acc + Object.keys(row).length, 0);
   if (have < needed) return null;
-  return { sources, destinations, costs };
+  // fix mis-typed arrays from pushUnique overload
+  const fixedSources = sources.map((s) => ({ name: s.name, supply: (s as unknown as { supply: number; demand?: number }).supply ?? (s as unknown as { demand: number }).demand }));
+  const fixedDests = (destinations as unknown as { name: string; supply: number }[]).map((d) => ({
+    name: d.name,
+    demand: (d as unknown as { demand: number }).demand ?? d.supply,
+  }));
+  return { sources: fixedSources, destinations: fixedDests, costs };
 }
 
 export function solveTransportation(data: TransportData): Analysis {
@@ -256,17 +671,17 @@ export function solveTransportation(data: TransportData): Analysis {
       ...sources.map((s) => `shipments from ${s.name} must not exceed supply ${s.supply}`),
       ...destinations.map((d) => `deliveries to ${d.name} must meet demand ${d.demand}`),
     ],
-    assumptions: ['Shipping cost is linear in quantity; fractional units allowed.'],
+    assumptions: ['Understood your wording automatically; shipping cost is linear in quantity and fractional units are allowed.'],
     products: [],
     resources: [],
     shipments,
     strategies: [],
     total_cost: totalCost,
-    explanation: `The lowest-cost transportation plan has a total shipping cost of $${totalCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+    explanation: `Understood as shipping from ${sources.map((s) => s.name).join(', ')} to ${destinations.map((d) => d.name).join(', ')}. The lowest-cost transportation plan has a total shipping cost of $${totalCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
   };
 }
 
-/* ---------------- game theory parsing + solving (port of backend) ----------- */
+/* ---------------- game theory parsing + solving ----------------------------- */
 
 export function solveGameActions(
   first: string,
@@ -311,13 +726,36 @@ export function solveGameActions(
   };
 }
 
+function detectActions(text: string): [string, string] | null {
+  let m: RegExpExecArray | null;
+  m = /choose\s+([A-Za-z]+)\s+or\s+([A-Za-z]+)/i.exec(text);
+  if (m) return [m[1], m[2]];
+  m = /(?:actions?|strategies?|options?|moves?|choices?)\s*(?:are|:)?\s*([A-Za-z]+)\s+(?:and|or|,)\s+([A-Za-z]+)/i.exec(text);
+  if (m && /player|payoff|game|versus|vs|opponent|compet/i.test(text)) return [m[1], m[2]];
+  m = /\b([A-Z][a-z]+)\s+(?:or|vs\.?|versus)\s+([A-Z][a-z]+)\b/.exec(text);
+  if (m && /player|payoff|game/i.test(text)) return [m[1], m[2]];
+  return null;
+}
+
 function parseGame(text: string): Analysis | null {
-  const gameMatch = /choose\s+([A-Za-z]+)\s+or\s+([A-Za-z]+)/i.exec(text);
-  if (!gameMatch || !/player\s+1|player\s+2|payoff|expected payoff/i.test(text)) return null;
-  const [, first, second] = gameMatch;
-  const listed = /payoffs?\s+(?:are|of)\s+(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and)\s*(-?\d+(?:\.\d+)?)/i.exec(text);
+  if (!/player\s+1|player\s+2|payoff|expected payoff|zero-sum|game|opponent|versus|\bvs\b/i.test(text)) return null;
+  const actions = detectActions(text);
+  if (!actions) return null;
+  const [first, second] = actions;
+  const listed = /payoffs?\s+(?:are|of|is)?\s*\[?(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*and|,|and|;|\s)\s*(-?\d+(?:\.\d+)?)\]?/i.exec(text);
   if (listed) {
     const v = listed.slice(1, 5).map(Number);
+    if (v.every((x) => Number.isFinite(x))) {
+      return solveGameActions(first, second, {
+        [first]: { [first]: v[0], [second]: v[1] },
+        [second]: { [first]: v[2], [second]: v[3] },
+      });
+    }
+  }
+  // matrix form [[a,b],[c,d]]
+  const matrixNums = text.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+  if (/\[\s*\[?-?\d[\s\S]*?,\s*-?\d[\s\S]*?\]/ .test(text) && matrixNums.length >= 4) {
+    const v = matrixNums.slice(0, 4);
     return solveGameActions(first, second, {
       [first]: { [first]: v[0], [second]: v[1] },
       [second]: { [first]: v[2], [second]: v[3] },
@@ -331,27 +769,56 @@ function parseGame(text: string): Analysis | null {
     [second, second, new RegExp(`both\\s+${esc(second)}.*?(-?\\d+(?:\\.\\d+)?)`, 'i')],
   ];
   const payoffs: Record<string, Record<string, number>> = {};
+  let found = 0;
   for (const [a, b, re] of patterns) {
     const mm = re.exec(text);
-    if (!mm) return null;
-    payoffs[a] = payoffs[a] ?? {};
-    payoffs[a][b] = parseFloat(mm[1]);
+    if (mm) {
+      payoffs[a] = payoffs[a] ?? {};
+      payoffs[a][b] = parseFloat(mm[1]);
+      found += 1;
+    }
   }
-  return solveGameActions(first, second, payoffs);
+  if (found === 4) return solveGameActions(first, second, payoffs);
+  // last resort: any 4 numbers after the word "payoff"
+  const after = /payoff[\s\S]*/i.exec(text)?.[0] ?? '';
+  const nums = after.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+  if (nums.length >= 4) {
+    const v = nums.slice(0, 4);
+    return solveGameActions(first, second, {
+      [first]: { [first]: v[0], [second]: v[1] },
+      [second]: { [first]: v[2], [second]: v[3] },
+    });
+  }
+  return null;
 }
 
 /* ---------------- dispatcher ------------------------------------------------ */
 
-const TRANSPORT_WORDS = /warehouse|ship|shipping|transport|freight|supplier|customer|distribution/i;
+const TRANSPORT_WORDS = /warehouse|ship|shipping|transport|freight|supplier|customer|distribution|supply|demand|destination|source|deliver/i;
+const GAME_WORDS = /player\s+[12]|payoff|zero-sum|mixed strateg|opponent|versus|\bvs\b/i;
+const GENERAL_MATH = /solve\s+(for\s+)?x\b|derivative|integral|quadratic|differentiate|integrate|simplify|factor(ize|ise)?|eigen|matrix\s+inverse|determinant|limit\s+of|dy\/dx/i;
 
 export function isTransportLike(text: string): boolean {
   return TRANSPORT_WORDS.test(text);
 }
 
+function looksLikeGeneralMath(text: string): boolean {
+  if (!GENERAL_MATH.test(text)) return false;
+  // optimization keywords take precedence — it's an OR problem, not algebra
+  if (/profit|margin|capacity|supply|demand|shipping|payoff|resource|machine|labo?r|oven|chips|warehouse|store/i.test(text)) return false;
+  return true;
+}
+
 /** Solve entirely in-browser. Throws Error with a user-friendly message on failure. */
 export function solveLocally(problem: string): Analysis {
   const text = problem.trim();
-  if (text.length < 10) throw new Error('Please add a little more detail — profits, resources and capacities help the solver.');
+  if (text.length < 10) throw new Error('Please describe your optimization problem in your own words — for example what you make, what limits you, or where you ship.');
+
+  if (looksLikeGeneralMath(text)) {
+    throw new Error(
+      'OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math like equations or calculus. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.',
+    );
+  }
 
   const game = parseGame(text);
   if (game) return game;
@@ -360,14 +827,24 @@ export function solveLocally(problem: string): Analysis {
   const t = parseTransportation(text);
   if (t) return solveTransportation(t);
   if (transportWords) {
-    throw new Error(
-      'Transportation needs: each source like "Warehouse A has supply 100", each destination like "Store X needs demand 120", and every route like "A to X costs 4". Add those details and try again.',
-    );
+    // If it really looks like transport but costs are missing, explain once.
+    const hasSupply = /suppl|supply|stock|inventory|capacity|ships?|sends?|warehouse|factory|plant/i.test(text);
+    const hasDemand = /demand|needs?|requires?|orders?|wants?|takes?|receives?|customers?|stores?|destinations?/i.test(text);
+    if (hasSupply && hasDemand) {
+      throw new Error(
+        'I can see this is a shipping problem, but I need every route cost too — e.g. "A to X costs 4". Add supplies, demands, and all route costs in any wording and I will solve it.',
+      );
+    }
   }
 
   const prod = parseProduction(text);
   if (prod) return solveProduction(prod.products, prod.capacities);
+  if (GAME_WORDS.test(text)) {
+    throw new Error(
+      'This looks like a game-theory problem. Tell me the two choices (e.g. "choose Attack or Defend") and the four payoffs for Player 1, in any wording, and I will find the optimal mixed strategy.',
+    );
+  }
   throw new Error(
-    'Could not build a model from that text. For production try: "Product A gives 40 profit and needs 2 units Machine and 1 units Labor. ... We have 100 units Machine and 80 units Labor." Or use a built-in example.',
+    'I could not build an optimization model from that text. I only solve production, transportation, and game-theory problems — not general math. Try e.g.: "We make chairs (40 profit, 2 wood + 1 labor) and tables (30 profit, 1 wood + 2 labor). We have 100 wood and 80 labor." Any wording with the same numbers works.',
   );
 }
