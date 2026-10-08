@@ -80,26 +80,55 @@ export async function extractWithAI(problem: string): Promise<Analysis> {
   if (!baseUrl || !apiKey || !model) throw new Error('AI is not configured.');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45000);
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: PROMPT + problem }],
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
+    // Retry once on transient failures (overloaded provider / flaky network).
+    let response: Response | null = null;
+    let networkError: unknown = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: PROMPT + problem }],
+            temperature: 0,
+          }),
+          signal: controller.signal,
+        });
+        networkError = null;
+      } catch (error) {
+        networkError = error;
+        response = null;
+        if (attempt < 2) await sleep(1200);
+        continue;
+      }
+      if (response.ok) break;
       if (response.status === 401 || response.status === 403) {
         throw new Error('The site AI key was rejected. The owner needs to check the key and its restrictions.');
       }
       if (response.status === 429) throw new Error('The free AI quota is used up right now. Try an example or come back later.');
-      throw new Error(`AI request failed (${response.status}). Falling back.`);
+      if ((response.status === 502 || response.status === 503 || response.status === 504) && attempt < 2) {
+        await sleep(1500);
+        continue;
+      }
+      break;
+    }
+    if (!response) {
+      if (networkError instanceof DOMException && networkError.name === 'AbortError') {
+        throw new Error('The AI service took too long to answer. The optimal answer below was solved in your browser instead.');
+      }
+      throw new Error('Could not reach the AI service (network error or wrong base URL). The owner should check VITE_AI_BASE_URL.');
+    }
+    if (!response.ok) {
+      if (response.status === 503 || response.status === 502 || response.status === 504) {
+        throw new Error('The AI service is temporarily overloaded. The optimal answer below was solved in your browser instead.');
+      }
+      throw new Error(`AI request failed (${response.status}). The optimal answer below was solved in your browser instead.`);
     }
     const payload = (await response.json()) as {
       choices?: { message?: { content?: string } }[];
