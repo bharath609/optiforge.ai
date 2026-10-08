@@ -19,7 +19,7 @@ frontend_origins = [
         "FRONTEND_ORIGINS",
         os.getenv(
             "FRONTEND_ORIGIN",
-            "http://localhost:5173,https://optiforge-ai.vercel.app,https://optiforge.ai,https://www.optiforge.ai",
+            "http://localhost:5173,https://optiforge-ai.vercel.app,https://optiforge.ai,https://www.optiforge.ai,https://optisolve.vercel.app,https://optisolve.ai,https://www.optisolve.ai",
         ),
     ).split(",")
     if origin.strip()
@@ -35,7 +35,7 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"message": "OptiForge backend is working"}
+    return {"message": "OptiSolve backend is working"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)

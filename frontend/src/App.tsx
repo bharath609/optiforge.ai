@@ -255,7 +255,7 @@ function App() {
         <div className="brand">
           <span className="brand-mark"><LogoIcon /></span>
           <span>
-            optiforge.ai
+            optisolve.ai
             <small>Operations research, simplified</small>
           </span>
         </div>
@@ -287,7 +287,7 @@ function App() {
               Turn operational complexity into <span className="gradient">clear decisions.</span>
             </h1>
             <p className="hero-text">
-              Describe your business problem in <strong>plain English — any wording works</strong>. OptiForge identifies the right model —
+              Describe your business problem in <strong>plain English — any wording works</strong>. OptiSolve identifies the right model —
               production, transportation, or game theory — and returns a <strong>mathematically optimal plan</strong> in seconds.
             </p>
             <div className="hero-actions">
@@ -631,7 +631,7 @@ function App() {
       <footer>
         <div className="foot-inner">
           <div className="brand">
-            <span className="brand-mark"><LogoIcon /></span> optiforge.ai
+            <span className="brand-mark"><LogoIcon /></span> optisolve.ai
           </div>
           <p>Open-source operations research for everyone. Built with React, FastAPI, and HiGHS.</p>
           <div className="foot-links">
@@ -643,7 +643,7 @@ function App() {
             </a>
             <a href="#solver">Solver</a>
           </div>
-          <small>© 2026 OptiForge · MIT License</small>
+          <small>© 2026 OptiSolve · MIT License</small>
         </div>
       </footer>
     </div>

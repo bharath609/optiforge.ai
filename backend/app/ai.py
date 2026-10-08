@@ -83,7 +83,7 @@ Use consistent names, preserve all stated numbers, and do not invent missing num
     content = await asyncio.to_thread(call_provider)
     payload = json.loads(_strip_code_fence(content))
     if payload.get("error") == "unsupported":
-        raise ValueError("OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
+        raise ValueError("OptiSolve only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
     return BusinessModel.model_validate(payload)
 
 
@@ -522,7 +522,7 @@ def _extract_with_fallback(problem: str) -> BusinessModel:
             "assumptions": ["Understood your wording automatically; quantities may be fractional unless whole units are required."],
         })
     if re.search(r"solve\s+(for\s+)?x\b|derivative|integral|quadratic|differentiate|integrate|simplify", text, re.I):
-        raise ValueError("OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
+        raise ValueError("OptiSolve only solves optimization problems — production planning, transportation, and game theory — not general math. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.")
     if re.search(r"warehouse|ship|shipping|transport|freight|supplier|customer|distribution|supply|demand", text, re.I):
         raise ValueError("I can see a shipping problem, but I need supplies, demands, and every route cost too — e.g. 'Warehouse A supplies 100, Store X needs 120, A to X costs 4'. Add those in any wording and try again.")
     raise ValueError("I could not build an optimization model from that text. I only solve production, transportation, and game-theory problems — not general math. Try e.g.: 'We make chairs (40 profit, 2 wood + 1 labor) and tables (30 profit, 1 wood + 2 labor). We have 100 wood and 80 labor.' Any wording with the same numbers works.")

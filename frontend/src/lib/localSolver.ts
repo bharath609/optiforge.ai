@@ -816,7 +816,7 @@ export function solveLocally(problem: string): Analysis {
 
   if (looksLikeGeneralMath(text)) {
     throw new Error(
-      'OptiForge only solves optimization problems — production planning, transportation, and game theory — not general math like equations or calculus. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.',
+      'OptiSolve only solves optimization problems — production planning, transportation, and game theory — not general math like equations or calculus. Describe profits with limited resources, shipping supplies/demands/costs, or a game payoff, in any wording.',
     );
   }
 
