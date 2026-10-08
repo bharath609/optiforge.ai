@@ -263,7 +263,7 @@ function App() {
           <a href="#solver">Solver</a>
           <a href="#how">How it works</a>
           <a href="#use-cases">Use cases</a>
-          <a href="https://github.com/bharath609/optiforge.ai" target="_blank" rel="noreferrer">
+          <a href="https://github.com/bharath609/optisolve" target="_blank" rel="noreferrer">
             GitHub
           </a>
         </nav>
@@ -635,7 +635,7 @@ function App() {
           </div>
           <p>Open-source operations research for everyone. Built with React, FastAPI, and HiGHS.</p>
           <div className="foot-links">
-            <a href="https://github.com/bharath609/optiforge.ai" target="_blank" rel="noreferrer">
+            <a href="https://github.com/bharath609/optisolve" target="_blank" rel="noreferrer">
               GitHub
             </a>
             <a href="https://optiforge-ai.vercel.app/" target="_blank" rel="noreferrer">
